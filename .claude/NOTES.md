@@ -49,6 +49,93 @@ Keep entries terse — this is a reference, not a transcript.
   this to be gotten wrong in the first place (see `@rapidrest/cli`'s own NOTES.md, 2026-09-07 entry,
   for the full incident writeup and the `CHANGELOG_NOISE_PATTERNS` fix that accompanied it).
 
+### 2026-09-22 — Round-8 review fixes (STR_I byte cap, timing-safe PolicyKey, pairing race) + restapi 0.19.0 bump + coverage
+
+Three new findings fixed, restapi bumped from `^0.10.0` to `^0.19.0` (real compatibility work, not just a
+version-string bump), and the three flagged coverage gaps closed. Committed to `main`.
+
+- **1 WBXML `STR_I` uncapped.** None of `WbxmlDecoder`'s existing caps (`maxElements`/`maxChildrenPerElement`/
+  `maxDepth`) bounded the UTF-8 bytes a `STR_I` (inline string) token could carry - a single text-bearing field
+  (Subject, a Contact's notes `Body`, ...) could run up to the full 16 MB `mail:eas:max_request_bytes` cap while
+  every other decoder limit stayed nowhere near tripped: a poison-pill risk against Mongo's 16 MB document cap
+  (permanently unwritable, so it fails identically on every retry) and an egress-multiplication risk (re-served
+  every future sync round). Fixed with a new `maxInlineStringBytes` option (default
+  `WBXML_DEFAULT_MAX_INLINE_STRING_BYTES`, 4 MiB), tracked as a running total of raw UTF-8 bytes across every
+  `STR_I` token in the whole document (not just the largest single one - two 600-byte fields summing past the cap
+  throws too), reset per `decode()` call, throwing the same `WbxmlLimitError` every other cap throws. Independent
+  of, and in addition to, `BaseEasRoute`'s request-body-size check.
+- **2 Non-constant-time PolicyKey comparison.** `BaseEasRoute`'s provisioning-gate check and
+  `ProvisionCommand.acknowledgePolicy`'s phase-2 check both used plain `!==`/`===` on a secret token
+  (`crypto.randomBytes(8).toString("hex")`). New `src/CryptoUtils.ts` `timingSafeEqualStrings()` (length-checked
+  first, since `crypto.timingSafeEqual` throws on a length mismatch rather than returning `false`) is now used in
+  both places.
+- **3 TOCTOU on first device pairing.** `BaseEasRoute.findOrCreateDeviceSyncState()`'s `create()` call had no
+  catch: two concurrent first requests from the same (mailbox, deviceId) could both pass the `find()` check above
+  and both call `create()`; the unique index lets only one insert land, and the loser's `create()` throws. Turns
+  out `RepoUtils.create()` (this repo's actual installed `@rapidrest/service-core`) already converts a duplicate-
+  key error into `ApiError(IDENTIFIER_EXISTS, 400)` rather than an unhandled 500 as originally suspected - but the
+  loser still failed its request instead of transparently reading the winner's row. Fixed: the loser now catches
+  `IDENTIFIER_EXISTS` (or any raw driver duplicate-key error via service-core's own `isDuplicateKeyError()`,
+  covering a duplicate-key error some other layer throws first) and re-reads the row that won, returning it as if
+  it had been there all along - the same shape restapi's own `findOrCreateWellKnownFolder()` already uses for the
+  identical race (confirmed by reading its actual installed source while investigating finding 4 below).
+
+**restapi `^0.10.0` -> `^0.19.0`** (peer range `0.x` -> `>=0.10.0 <1`, matching `booking-plugin`'s bounded-peer-
+range pattern; no `resolutions` entry added here, unlike `booking-plugin`'s "pin to peer floor" convention -
+adding one would have forced `yarn install` back onto an old version and defeated the point of this bump, which
+was to actually build/test against current):
+- `yarn build` and `npx tsc --noEmit -p .` are clean against 0.19.0 with zero source changes needed - no ACL-
+  model-change (0.17.0) or query-DSL (0.13.0) fallout hit any mailbox-scoped route this plugin owns.
+- **One pre-existing, unrelated-to-the-bump test failure found and fixed while running the full suite**:
+  `SyncCommand.test.ts`'s Delete test asserted `folderRepo.find()` was called with the bare
+  `{ mailboxUid, type }` + `expect.anything()` shape restapi's `findOrCreateWellKnownFolder()` used well before
+  this bump (confirmed failing identically at the old pinned 0.10.0 too, via `git stash`) - it now sends an
+  explicit oldest-first `sort`/`limit` and matching `find()` options (the same lost-race retry shape finding 3
+  above turned out to mirror). Test updated to match the real call shape; not a regression this session
+  introduced, just never caught before because `tsc -p tsconfig.test.json` isn't a gate and this assertion still
+  ran (and silently drifted) under `vitest`.
+- **`tsc -p tsconfig.test.json` (documented pre-existing, not a gate) briefly went from 17 to 19 errors under
+  0.19.0**: `SearchProvider.bulkIndex()`'s return type changed `Promise<void>` -> `Promise<string[]>` (indexed
+  uids, so `SearchIndexJob` can retry only what didn't take), and `DnsResolver` gained `resolveCname()`/
+  `resolveSrv()` (MS-OXDISCO autodiscover CNAME/SRV checks). Both are pure interface additions with no plugin-code
+  fallout - fixed `test/testDoubles.ts`'s `NoopSearchProvider`/`StaticDnsResolver` to implement the current shape
+  (back down to the documented 17).
+- No genuine behavioral incompatibility found - nothing to report as a blocker.
+
+**Coverage** (target: the three files the review flagged). Full suite: 831 tests, 100% statement/line/function,
+98.51% branch (was 97.76%).
+- `ComposeMailCommand.ts` 87.1% -> 100% branch. New cases: a `<MIME>` element present but with neither `opaque`
+  nor `text` (400, not just the "MIME missing entirely" shape already covered); MIME body arriving as inline
+  `STR_I` text instead of `OPAQUE`; a mailbox with no `aliasAddresses` key at all (`?? []` fallback); a composed
+  Mime that already carries its own `Message-ID` (the Sent Items copy keeps the original bytes verbatim, the
+  `relayed.raw !== stripped` false branch every prior test missed since none of them set one); an absent Subject
+  defaulting to `""`; an HTML-only body with no plain-text part (`bodyPreview` defaulting to `""`) plus a real
+  attachment (`hasAttachments` true); two separate `To:` header lines (mailparser leaves genuinely-repeated
+  `To`/`Cc`/`Bcc` headers as an `AddressObject[]`, not the single-object shape every other test's MIME uses -
+  `addressesOf()`'s `Array.isArray` branch was otherwise dead); a `SmartReply` denied `UPDATE` on the original's
+  folder (relays, skips `markOriginal`, doesn't throw - as opposed to the already-covered case where `UPDATE` is
+  granted but the write itself throws). One branch marked `/* v8 ignore next */` instead of chased: mailparser's
+  `simpleParser()` always initializes `attachments` to `[]`, so `parsed.attachments?.length ?? 0`'s nullish side
+  is provably dead code, matching this file's own existing precedent for two other defense-in-depth checks.
+- `EasCollectionLease.ts` 89.5% -> 100% branch. New cases: `forgetClient()` called with a promise reference a
+  newer client already superseded (must not evict the newer one); releasing an in-process lease whose local map
+  entry something else has since taken over (same "don't evict what isn't yours" shape, for the in-process side);
+  a late Redis `SET` that finally resolves but lost the `NX` race (another copy took the key first, so nothing
+  should be released); the undocumented-but-real 100ms default poll interval when `pollMs` is omitted. The middle
+  two needed poking `(EasCollectionLease as any).clients`/`.local` directly (TS `private` is compile-time only) -
+  there's no way to force these exact interleavings through the public `acquire()`/release-function API alone.
+- `MoveItemsCommand.ts` 90.3% -> 100% branch. New cases: `handle()` with no request body at all (empty response,
+  no `Move` children); a `Move` element missing `SrcMsgId` itself (response omits `SrcMsgId` rather than any
+  particular value); `planMessageMove`'s two distinct refusal reasons actually landing on their documented status
+  codes side by side (`"destination"` -> 2, `"inFlight"`/`"sent"` -> 7 via `STATUS_LOCKED`) - previously only the
+  update-throws-an-exception path to `STATUS_LOCKED` was covered, not the plan-level refusal path.
+- New coverage tests added to `test/routes/mongo/EasRoute.test.ts` only (not mirrored to `sql/` - real HTTP+DB
+  integration tests for `ComposeMailCommand`'s success-path behavior already follow that single-backend
+  convention in this file per the existing "guard clauses only" isolated-test comment; the codec/lease/plan-level
+  gaps are backend-agnostic unit tests either way).
+- Checks: `yarn lint` and `npx tsc --noEmit -p .` clean. Full run 35 files / 831 tests, coverage
+  100 / 98.51 / 100 / 100 (thresholds met).
+
 ### 2026-09-14 (7) — Round-6 review fixes (invite spoofing, non-owner audit, lease hangs, drafts, DeviceId)
 
 All 8 findings re-checked against the code and fixed; nothing skipped. Also aligned with restapi's round-6 "part A"

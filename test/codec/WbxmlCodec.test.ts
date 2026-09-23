@@ -12,6 +12,7 @@ import {
     WBXML_DEFAULT_MAX_CHILDREN_PER_ELEMENT,
     WBXML_DEFAULT_MAX_DEPTH,
     WBXML_DEFAULT_MAX_ELEMENTS,
+    WBXML_DEFAULT_MAX_INLINE_STRING_BYTES,
 } from "../../src/codec/WbxmlDecoder.js";
 import {
     WbxmlEncoder,
@@ -393,6 +394,7 @@ describe("WBXML codec Tests", () => {
             expect(WBXML_DEFAULT_MAX_ELEMENTS).toBe(50_000);
             expect(WBXML_DEFAULT_MAX_CHILDREN_PER_ELEMENT).toBe(10_000);
             expect(WBXML_DEFAULT_MAX_DEPTH).toBe(64);
+            expect(WBXML_DEFAULT_MAX_INLINE_STRING_BYTES).toBe(4 * 1024 * 1024);
         });
 
         it("Throws WbxmlLimitError when a custom maxElements is exceeded (root counts as one element).", () => {
@@ -457,10 +459,55 @@ describe("WBXML codec Tests", () => {
             expect(() => new WbxmlDecoder({ maxDepth: 100 }).decode(nested(100))).not.toThrow();
         });
 
+        it("Throws WbxmlLimitError when a single STR_I run exceeds a custom maxInlineStringBytes.", () => {
+            const bytes = new WbxmlEncoder().encode(textElement(WbxmlCodePage.AirSync, "Sync", "a".repeat(1000)));
+            expect(() => new WbxmlDecoder({ maxInlineStringBytes: 999 }).decode(bytes)).toThrow(WbxmlLimitError);
+            expect(() => new WbxmlDecoder({ maxInlineStringBytes: 999 }).decode(bytes)).toThrow(
+                /exceeded maximum inline string \(STR_I\) total of 999 bytes/,
+            );
+            expect(new WbxmlDecoder({ maxInlineStringBytes: 1000 }).decode(bytes).text).toBe("a".repeat(1000));
+        });
+
+        it("Sums STR_I bytes across every element in the document, not just the largest one.", () => {
+            // Two children, each carrying 600 bytes of inline text: 1200 bytes total, over a 1000-byte cap, even
+            // though neither child alone would trip it.
+            const bytes = new WbxmlEncoder().encode(
+                element(WbxmlCodePage.AirSync, "Sync", [
+                    textElement(WbxmlCodePage.AirSync, "Class", "b".repeat(600)),
+                    textElement(WbxmlCodePage.AirSync, "Class", "c".repeat(600)),
+                ]),
+            );
+            expect(() => new WbxmlDecoder({ maxInlineStringBytes: 1000 }).decode(bytes)).toThrow(WbxmlLimitError);
+            expect(() => new WbxmlDecoder({ maxInlineStringBytes: 1200 }).decode(bytes)).not.toThrow();
+        });
+
+        it("Rejects an oversized inline string under the real default cap, not just a lowered test cap.", () => {
+            // One STR_I run one byte over WBXML_DEFAULT_MAX_INLINE_STRING_BYTES - the poison-pill shape (a huge
+            // Subject/Body/notes field) this cap exists to catch, with no other limit anywhere near tripped.
+            const bytes = new WbxmlEncoder().encode(
+                textElement(WbxmlCodePage.AirSync, "Sync", "x".repeat(WBXML_DEFAULT_MAX_INLINE_STRING_BYTES + 1)),
+            );
+            expect(() => new WbxmlDecoder().decode(bytes)).toThrow(WbxmlLimitError);
+        });
+
+        it("Honors a raised maxInlineStringBytes.", () => {
+            const bytes = new WbxmlEncoder().encode(textElement(WbxmlCodePage.AirSync, "Sync", "d".repeat(2000)));
+            expect(() => new WbxmlDecoder({ maxInlineStringBytes: 1000 }).decode(bytes)).toThrow(WbxmlLimitError);
+            expect(new WbxmlDecoder({ maxInlineStringBytes: 2000 }).decode(bytes).text).toBe("d".repeat(2000));
+        });
+
         it("Resets counters between decode() calls on the same instance.", () => {
             const decoder = new WbxmlDecoder({ maxElements: 5 });
             expect(() => decoder.decode(flat(4))).not.toThrow();
             expect(() => decoder.decode(flat(4))).not.toThrow();
+        });
+
+        it("Resets the inline-string byte counter between decode() calls on the same instance.", () => {
+            const decoder = new WbxmlDecoder({ maxInlineStringBytes: 1000 });
+            const bytes = new WbxmlEncoder().encode(textElement(WbxmlCodePage.AirSync, "Sync", "e".repeat(900)));
+            expect(() => decoder.decode(bytes)).not.toThrow();
+            // A second, independent document under the same cap must not fail from the first call's leftover count.
+            expect(() => decoder.decode(bytes)).not.toThrow();
         });
 
         it("Rejects non-positive or non-integer limit options with a RangeError.", () => {
@@ -468,6 +515,7 @@ describe("WBXML codec Tests", () => {
             expect(() => new WbxmlDecoder({ maxChildrenPerElement: 1.5 })).toThrow(/maxChildrenPerElement/);
             expect(() => new WbxmlDecoder({ maxDepth: -1 })).toThrow(/maxDepth must be a positive integer/);
             expect(() => new WbxmlDecoder({ maxElements: Number.NaN })).toThrow(RangeError);
+            expect(() => new WbxmlDecoder({ maxInlineStringBytes: 0 })).toThrow(/maxInlineStringBytes/);
         });
     });
 

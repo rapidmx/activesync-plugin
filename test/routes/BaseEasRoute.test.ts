@@ -19,8 +19,8 @@
 // published `service-core` dependency doesn't yet include - see `BaseEasRoute.ts`'s own doc comment. A direct
 // call proves the handler's own header-building logic is correct regardless of that upstream dependency.
 import config from "../config.js";
-import { ObjectFactory } from "@rapidrest/service-core";
-import { Logger } from "@rapidrest/core";
+import { ApiErrors, ObjectFactory } from "@rapidrest/service-core";
+import { ApiError, Logger } from "@rapidrest/core";
 import { BaseEasRoute } from "../../src/BaseEasRoute.js";
 import { WbxmlDecoder } from "../../src/codec/WbxmlDecoder.js";
 
@@ -150,6 +150,61 @@ describe("BaseEasRoute Tests (guard clauses only)", () => {
         await route.dispatch({ query: { Cmd: "NoOp", DeviceId: "dev1", PolicyKey: "pk-1" }, headers: {} } as any, viaQuery, { uid: "user-1" } as any);
         expect(viaQuery.status).toHaveBeenCalledWith(200);
         expect(handle.mock.calls[0][0].policyKey).toBe("pk-1");
+    });
+
+    it("dispatch() rejects a wrong-length or wrong-value policy key and accepts the exact stored one (timing-safe compare).", async () => {
+        const { route, handle } = provisionedRoute();
+
+        const shorter = makeRes();
+        await route.dispatch({ query: { Cmd: "NoOp", DeviceId: "dev1" }, headers: { "x-ms-policykey": "pk" } } as any, shorter, { uid: "user-1" } as any);
+        expect(shorter.status).toHaveBeenCalledWith(449);
+
+        const sameLengthWrong = makeRes();
+        await route.dispatch({ query: { Cmd: "NoOp", DeviceId: "dev1" }, headers: { "x-ms-policykey": "pk-2" } } as any, sameLengthWrong, { uid: "user-1" } as any);
+        expect(sameLengthWrong.status).toHaveBeenCalledWith(449);
+        expect(handle).not.toHaveBeenCalled();
+
+        const exact = makeRes();
+        await route.dispatch({ query: { Cmd: "NoOp", DeviceId: "dev1" }, headers: { "x-ms-policykey": "pk-1" } } as any, exact, { uid: "user-1" } as any);
+        expect(exact.status).toHaveBeenCalledWith(200);
+        expect(handle).toHaveBeenCalledTimes(1);
+    });
+
+    it("dispatch() transparently reads back the winner's row when two concurrent first-pairing creates race on the unique (mailboxUid, deviceId) index.", async () => {
+        const route = objectFactory.newInstance<TestEasRoute>(TestEasRoute, { initialize: false }) as TestEasRoute;
+        const winner = { uid: "dss-1", version: 1, provisioned: false, policyKey: undefined, mailboxUid: "mbx-1", deviceId: "dev1" };
+        const find = vi
+            .fn()
+            .mockResolvedValueOnce([]) // this request's own lookup sees no existing row yet
+            .mockResolvedValueOnce([winner]); // re-read after the losing create() finds the concurrent winner
+        const create = vi.fn().mockRejectedValue(new ApiError(ApiErrors.IDENTIFIER_EXISTS, 400, "already exists"));
+        const handle = vi.fn().mockResolvedValue(undefined);
+        (route as any).deviceSyncStateRepo = { find, create, instantiateObject: (o: any) => o, update: vi.fn() };
+        (route as any).mailboxRepo = { find: vi.fn().mockResolvedValue([{ uid: "mbx-1" }]) };
+        (route as any).handlers.set("Provision", { command: "Provision", handle });
+
+        const res = makeRes();
+        // Provision is exempt from the provisioning gate, so this exercises find-or-create without needing a policy key.
+        await route.dispatch({ query: { Cmd: "Provision", DeviceId: "dev1" }, headers: {} } as any, res, { uid: "user-1" } as any);
+
+        expect(find).toHaveBeenCalledTimes(2);
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(handle.mock.calls[0][0].deviceSyncState).toBe(winner);
+    });
+
+    it("dispatch() lets a create() failure that isn't a duplicate-key conflict propagate.", async () => {
+        const route = objectFactory.newInstance<TestEasRoute>(TestEasRoute, { initialize: false }) as TestEasRoute;
+        const find = vi.fn().mockResolvedValue([]);
+        const create = vi.fn().mockRejectedValue(new Error("db unavailable"));
+        (route as any).deviceSyncStateRepo = { find, create, instantiateObject: (o: any) => o, update: vi.fn() };
+        (route as any).mailboxRepo = { find: vi.fn().mockResolvedValue([{ uid: "mbx-1" }]) };
+        (route as any).handlers.set("Provision", { command: "Provision", handle: vi.fn() });
+
+        await expect(
+            route.dispatch({ query: { Cmd: "Provision", DeviceId: "dev1" }, headers: {} } as any, makeRes(), { uid: "user-1" } as any),
+        ).rejects.toThrow("db unavailable");
+        expect(find).toHaveBeenCalledTimes(1);
     });
 
     it("dispatch() maps a malformed WBXML body to HTTP 400, but lets any other decoding failure propagate.", async () => {

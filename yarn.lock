@@ -728,7 +728,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/activesync-plugin@workspace:."
   dependencies:
-    "@rapidmx/restapi": "npm:^0.10.0"
+    "@rapidmx/restapi": "npm:^0.19.0"
     "@rapidrest/core": "npm:^5.2.2"
     "@rapidrest/service-core": "npm:^2.1.0"
     "@swc/core": "npm:^1.16.2"
@@ -764,19 +764,20 @@ __metadata:
     vitest: "npm:^5.0.0"
     winston: "npm:^3.19.0"
   peerDependencies:
-    "@rapidmx/restapi": 0.x
+    "@rapidmx/restapi": ">=0.10.0 <1"
     "@rapidrest/core": 5.x
     "@rapidrest/service-core": 2.x
   languageName: unknown
   linkType: soft
 
-"@rapidmx/restapi@npm:^0.10.0":
-  version: 0.10.0
-  resolution: "@rapidmx/restapi@npm:0.10.0"
+"@rapidmx/restapi@npm:^0.19.0":
+  version: 0.19.0
+  resolution: "@rapidmx/restapi@npm:0.19.0"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
     html-to-text: "npm:^10.0.1"
+    htmlparser2: "npm:^10.1.0"
     mailparser: "npm:^3.9.23"
     nodemailer: "npm:^10.0.1"
     pst-extractor: "npm:^1.12.0"
@@ -804,7 +805,7 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/d19871ee146e1824047a6b5cccd8cd0e05257d09919853e41ecd180b279be7d3c0bf4c1889259badd7ab9a33efc7be49d4879210a4067a65c0437178ba6a59bf
+  checksum: 10c0/205c79db6e5b7a5c87f9b6bf8a42a49864c5c9dabaf544fd042603d1054580a8b0ab5be89a25a4cb9bcfd9416270e098ef606133b6518e481cd2794642c040fe
   languageName: node
   linkType: hard
 

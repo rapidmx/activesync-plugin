@@ -22,7 +22,7 @@
         "prepublish": "yarn build"
     },
     "peerDependencies": {
-        "@rapidmx/restapi": "0.x",
+        "@rapidmx/restapi": ">=0.10.0 <1",
         "@rapidrest/core": "5.x",
         "@rapidrest/service-core": "2.x"
     },
@@ -31,7 +31,7 @@
         "nodemailer": "^10.0.1"
     },
     "devDependencies": {
-        "@rapidmx/restapi": "^0.10.0",
+        "@rapidmx/restapi": "^0.19.0",
         "@rapidrest/core": "^5.2.2",
         "@rapidrest/service-core": "^2.1.0",
         "@swc/core": "^1.16.2",

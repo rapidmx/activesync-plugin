@@ -2384,6 +2384,172 @@ describe("Route:EasRouteMongo Tests", () => {
             expect(saved?.recipients.map((r) => r.address).sort()).toEqual(["alice@example.com", "bob@example.com"]);
         });
 
+        it("SendMail with SaveInSentItems stores the original bytes unchanged when the composed Mime already has its own Message-ID.", async () => {
+            await createMailbox(owner.uid, ["owner@example.com"]);
+            await provisionDevice("dev1");
+            const raw = Buffer.from(
+                [
+                    "From: owner@example.com",
+                    "To: recipient@example.com",
+                    "Message-ID: <already-set@example.com>",
+                    "Subject: Has Its Own Message-ID",
+                    "MIME-Version: 1.0",
+                    "Content-Type: text/plain; charset=utf-8",
+                    "",
+                    "Hello.",
+                    "",
+                ].join("\r\n"),
+            );
+
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                .set("Authorization", "jwt " + ownerToken)
+                .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(new WbxmlEncoder().encode(composeRequest("SendMail", raw, { saveInSentItems: true })));
+
+            expect(result.status).toBeGreaterThanOrEqual(200);
+            expect(result.status).toBeLessThan(300);
+            const saved: any = await messageRepo.findOne({ subject: "Has Its Own Message-ID" } as any);
+            expect(saved.messageId).toBe("already-set@example.com");
+            // No Message-ID was injected (the device's own was reused), so the stored blob is the untouched original.
+            expect(await blobStore().get(saved.bodyBlobKey)).toEqual(raw);
+        });
+
+        it("SendMail with SaveInSentItems defaults an absent Subject to an empty string.", async () => {
+            await createMailbox(owner.uid, ["owner@example.com"]);
+            await provisionDevice("dev1");
+            const noSubject = Buffer.from(
+                ["From: owner@example.com", "To: recipient@example.com", "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "", "No subject here.", ""].join(
+                    "\r\n",
+                ),
+            );
+
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                .set("Authorization", "jwt " + ownerToken)
+                .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(new WbxmlEncoder().encode(composeRequest("SendMail", noSubject, { saveInSentItems: true })));
+
+            expect(result.status).toBeGreaterThanOrEqual(200);
+            expect(result.status).toBeLessThan(300);
+            const sentFolder = await folderRepo.findOne({ type: FolderType.SENT_ITEMS } as any);
+            const saved: any = await messageRepo.findOne({ folderUid: sentFolder!.uid } as any);
+            expect(saved.subject).toBe("");
+        });
+
+        it("SendMail with SaveInSentItems derives an empty bodyPreview and hasAttachments true for an HTML-only message with an attachment.", async () => {
+            await createMailbox(owner.uid, ["owner@example.com"]);
+            await provisionDevice("dev1");
+            const boundary = "----EasRoundBoundary";
+            const htmlWithAttachment = Buffer.from(
+                [
+                    "From: owner@example.com",
+                    "To: recipient@example.com",
+                    "Subject: HTML Only With Attachment",
+                    "MIME-Version: 1.0",
+                    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+                    "",
+                    `--${boundary}`,
+                    "Content-Type: text/html; charset=utf-8",
+                    "",
+                    "<p>No plain-text part here.</p>",
+                    "",
+                    `--${boundary}`,
+                    "Content-Type: text/plain; charset=utf-8",
+                    "Content-Disposition: attachment; filename=\"note.txt\"",
+                    "",
+                    "attachment contents",
+                    "",
+                    `--${boundary}--`,
+                    "",
+                ].join("\r\n"),
+            );
+
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                .set("Authorization", "jwt " + ownerToken)
+                .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(new WbxmlEncoder().encode(composeRequest("SendMail", htmlWithAttachment, { saveInSentItems: true })));
+
+            expect(result.status).toBeGreaterThanOrEqual(200);
+            expect(result.status).toBeLessThan(300);
+            const saved: any = await messageRepo.findOne({ subject: "HTML Only With Attachment" } as any);
+            expect(saved.bodyPreview).toBe("");
+            expect(saved.hasAttachments).toBe(true);
+        });
+
+        it("A SmartReply that lacks UPDATE permission on the original's folder still relays, without flagging it or throwing.", async () => {
+            const mailbox = await createMailbox(owner.uid, ["owner@example.com"]);
+            await provisionDevice("dev1");
+            const inbox = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+            const original = await createMessage(mailbox.uid, inbox.uid);
+            const route = [...(objectFactory as any).instances.values()].find((instance: any) => instance?.handlers?.get?.("SmartReply"));
+            const handler = route.handlers.get("SmartReply");
+            const hasPermission = vi
+                .spyOn(handler.aclUtils, "hasPermission")
+                .mockImplementation(async (_user: any, _uid: any, action: any) => action !== ACLAction.UPDATE);
+
+            try {
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SmartReply&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                    .send(
+                        new WbxmlEncoder().encode(
+                            composeRequest("SmartReply", rawMime({ from: "owner@example.com" }), {
+                                source: { folderUid: inbox.uid, itemId: original.uid },
+                            }),
+                        ),
+                    );
+
+                expect(result.status).toBeGreaterThanOrEqual(200);
+                expect(result.status).toBeLessThan(300);
+                expect(transport().sent.length).toBe(1);
+                const unchanged = await messageRepo.findOne({ uid: original.uid } as any);
+                expect(unchanged?.flags.answered).toBe(false);
+            } finally {
+                hasPermission.mockRestore();
+            }
+        });
+
+        it("SendMail delivers to every address when the composed Mime repeats the To header on separate lines.", async () => {
+            await createMailbox(owner.uid, ["owner@example.com"]);
+            await provisionDevice("dev1");
+            // mailparser only collapses a repeated To/Cc/Bcc header down to a single AddressObject when it sees
+            // exactly one occurrence; two separate `To:` lines instead parse to an AddressObject *array* -
+            // addressesOf() must flatten that shape too, not just the single-object case every other test uses.
+            const repeatedTo = Buffer.from(
+                [
+                    "From: owner@example.com",
+                    "To: first@example.com",
+                    "To: second@example.com",
+                    "Subject: Repeated To Header",
+                    "MIME-Version: 1.0",
+                    "Content-Type: text/plain; charset=utf-8",
+                    "",
+                    "Hello.",
+                    "",
+                ].join("\r\n"),
+            );
+
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                .set("Authorization", "jwt " + ownerToken)
+                .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(new WbxmlEncoder().encode(composeRequest("SendMail", repeatedTo, { saveInSentItems: true })));
+
+            expect(result.status).toBeGreaterThanOrEqual(200);
+            expect(result.status).toBeLessThan(300);
+            expect(transport().sent[0].envelopeTo.sort()).toEqual(["first@example.com", "second@example.com"]);
+            const saved = await messageRepo.findOne({ subject: "Repeated To Header" } as any);
+            expect(saved?.recipients.map((r) => r.address).sort()).toEqual(["first@example.com", "second@example.com"]);
+        });
+
         it("SendMail with a Source (non-standard, but not rejected) relays without touching any original message.", async () => {
             const mailbox = await createMailbox(owner.uid, ["owner@example.com"]);
             await provisionDevice("dev1");

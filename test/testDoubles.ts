@@ -19,6 +19,7 @@ import {
     type BlobStore,
     type DnsMxRecord,
     type DnsResolver,
+    type DnsSrvRecord,
     type MailTransport,
     type OutboundMessage,
     type TransportResult,
@@ -92,10 +93,11 @@ export class NoopSearchProvider implements SearchProvider {
         this.indexed.set(this.key(doc.entityType, doc.entityUid), doc);
     }
 
-    public async bulkIndex(docs: SearchDocument[]): Promise<void> {
+    public async bulkIndex(docs: SearchDocument[]): Promise<string[]> {
         for (const doc of docs) {
             await this.index(doc);
         }
+        return docs.map((doc) => doc.entityUid);
     }
 
     public async remove(entityType: SearchEntityType, entityUid: string): Promise<void> {
@@ -195,6 +197,14 @@ export class StaticDnsResolver implements DnsResolver {
 
     public async resolveMx(hostname: string): Promise<DnsMxRecord[]> {
         throw new Error(`StaticDnsResolver: no MX records for ${hostname}`);
+    }
+
+    public async resolveCname(hostname: string): Promise<string[]> {
+        throw new Error(`StaticDnsResolver: no CNAME records for ${hostname}`);
+    }
+
+    public async resolveSrv(hostname: string): Promise<DnsSrvRecord[]> {
+        throw new Error(`StaticDnsResolver: no SRV records for ${hostname}`);
     }
 }
 

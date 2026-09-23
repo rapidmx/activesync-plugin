@@ -13,7 +13,7 @@ import { ObjectFactory } from "@rapidrest/service-core";
 import { Logger } from "@rapidrest/core";
 import { SendMailCommandMongo } from "../../src/commands/mongo/SendMailCommandMongo.js";
 import { stripHeader } from "../../src/commands/ComposeMailCommand.js";
-import { childText, element, opaqueElement } from "../../src/codec/WbxmlElement.js";
+import { childText, element, opaqueElement, textElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
 
@@ -94,6 +94,49 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
 
         const { command, request } = build(["To: you@example.com"]);
         await expect((command as any).handle({ mailboxUid: "mbx", request })).rejects.toMatchObject({ status: 400 });
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it("handle() throws INVALID_REQUEST for a MIME element present but carrying neither opaque nor text content.", async () => {
+        const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+        Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo: {}, blobStore: {}, mailTransport: {}, scanPipeline: {} });
+        // Unlike the "request body is absent" guard above, `MIME` is present as a child element - it just has no
+        // opaque payload and no inline text, the shape `mimeEl?.opaque ?? (mimeEl?.text !== undefined ? ... : undefined)`
+        // must also treat as "no body" rather than assuming a present element always carries content.
+        const request = element(WbxmlCodePage.ComposeMail, "SendMail", [element(WbxmlCodePage.ComposeMail, "MIME", [])]);
+
+        await expect((command as any).handle({ mailboxUid: "mbx", request })).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("handle() reads the MIME body from inline text content, not just an opaque payload.", async () => {
+        const send = vi.fn();
+        const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com", aliasAddresses: [] }) };
+        const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+        Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo, blobStore: {}, mailTransport: { send }, scanPipeline: {} });
+        const mime = ["From: me@example.com", "Subject: Hi", "", "Body"].join("\r\n");
+        // A `<MIME>` element carrying inline `STR_I` text rather than `OPAQUE` bytes - `mimeEl?.opaque` is
+        // undefined here, so the fallback `mimeEl?.text !== undefined` branch must pick the text up instead.
+        const request = element(WbxmlCodePage.ComposeMail, "SendMail", [textElement(WbxmlCodePage.ComposeMail, "MIME", mime)]);
+
+        const response = await (command as any).handle({ mailboxUid: "mbx", request });
+
+        expect(childText(response, "Status")).toBe("119");
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it("handle() falls back to just the primary address when the mailbox has no aliasAddresses array at all.", async () => {
+        const send = vi.fn();
+        // No `aliasAddresses` key at all (not even `undefined` explicitly) - `[mailbox.primarySmtpAddress,
+        // ...(mailbox.aliasAddresses ?? [])]` must not throw spreading a missing/undefined array.
+        const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com" }) };
+        const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+        Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo, blobStore: {}, mailTransport: { send }, scanPipeline: {} });
+        const mime = Buffer.from(["From: me@example.com", "Subject: Hi", "", "Body"].join("\r\n"));
+        const request = element(WbxmlCodePage.ComposeMail, "SendMail", [opaqueElement(WbxmlCodePage.ComposeMail, "MIME", mime)]);
+
+        const response = await (command as any).handle({ mailboxUid: "mbx", request });
+
+        expect(childText(response, "Status")).toBe("119");
         expect(send).not.toHaveBeenCalled();
     });
 

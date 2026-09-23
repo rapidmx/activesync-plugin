@@ -6,6 +6,7 @@ import * as crypto from "crypto";
 import { ObjectDecorators } from "@rapidrest/core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
+import { timingSafeEqualStrings } from "../CryptoUtils.js";
 import { persistDeviceSyncState } from "../EasSyncKeyUtils.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 const { Config } = ObjectDecorators;
@@ -148,7 +149,11 @@ export class ProvisionCommand implements EasCommandHandler {
         clientPolicyKey: string,
         clientStatus: string | undefined,
     ): Promise<WbxmlElement> {
-        if (clientPolicyKey !== ctx.deviceSyncState.policyKey || clientStatus !== "1") {
+        if (
+            !ctx.deviceSyncState.policyKey ||
+            !timingSafeEqualStrings(clientPolicyKey, ctx.deviceSyncState.policyKey) ||
+            clientStatus !== "1"
+        ) {
             // Status 2 ("protocol error" per MS-ASPROV) - an approximation, not a byte-exact enumeration of
             // every real status code MS-ASPROV defines; this pragmatic subset only distinguishes success from
             // "something is wrong, start over" (see this class's own doc comment on scope), and deliberately

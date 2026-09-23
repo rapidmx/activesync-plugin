@@ -100,6 +100,80 @@ describe("ProvisionCommand Tests", () => {
         expect(ctx.deviceSyncState.provisioned).toBe(false);
     });
 
+    it("Provisions the device on a matching phase-2 acknowledgement (Status 1, exact policy key).", async () => {
+        const command = new ProvisionCommand();
+        const update = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeContext({
+            deviceSyncState: { uid: "dss-1", version: 1, policyKey: "abc123", provisioned: false } as any,
+            deviceSyncStateRepo: { update } as any,
+            request: element(WbxmlCodePage.Provision, "Provision", [
+                element(WbxmlCodePage.Provision, "Policies", [
+                    element(WbxmlCodePage.Provision, "Policy", [
+                        textElement(WbxmlCodePage.Provision, "PolicyType", "MS-EAS-Provisioning-WBXML"),
+                        textElement(WbxmlCodePage.Provision, "PolicyKey", "abc123"),
+                        textElement(WbxmlCodePage.Provision, "Status", "1"),
+                    ]),
+                ]),
+            ]),
+        });
+
+        const response = await command.handle(ctx);
+
+        expect(childText(response!, "Status")).toBe("1");
+        const policy = findChild(findChild(response!, "Policies")!, "Policy")!;
+        expect(childText(policy, "PolicyKey")).toBe("abc123");
+        expect(ctx.deviceSyncState.provisioned).toBe(true);
+        expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("Rejects phase 2 acknowledgement when the presented key differs from the stored one (timing-safe compare), without provisioning.", async () => {
+        const command = new ProvisionCommand();
+        const update = vi.fn().mockResolvedValue(undefined);
+        for (const presented of ["abc124", "different-length-entirely", ""]) {
+            const ctx = makeContext({
+                deviceSyncState: { uid: "dss-1", version: 1, policyKey: "abc123", provisioned: false } as any,
+                deviceSyncStateRepo: { update } as any,
+                request: element(WbxmlCodePage.Provision, "Provision", [
+                    element(WbxmlCodePage.Provision, "Policies", [
+                        element(WbxmlCodePage.Provision, "Policy", [
+                            textElement(WbxmlCodePage.Provision, "PolicyKey", presented || "x"),
+                            textElement(WbxmlCodePage.Provision, "Status", "1"),
+                        ]),
+                    ]),
+                ]),
+            });
+
+            const response = await command.handle(ctx);
+
+            expect(childText(response!, "Status")).toBe("2");
+            expect(ctx.deviceSyncState.provisioned).toBe(false);
+        }
+        expect(update).not.toHaveBeenCalled();
+    });
+
+    it("Rejects phase 2 acknowledgement when no policy was ever issued (deviceSyncState.policyKey undefined).", async () => {
+        const command = new ProvisionCommand();
+        const update = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeContext({
+            deviceSyncState: { uid: "dss-1", version: 1, policyKey: undefined, provisioned: false } as any,
+            deviceSyncStateRepo: { update } as any,
+            request: element(WbxmlCodePage.Provision, "Provision", [
+                element(WbxmlCodePage.Provision, "Policies", [
+                    element(WbxmlCodePage.Provision, "Policy", [
+                        textElement(WbxmlCodePage.Provision, "PolicyKey", "abc123"),
+                        textElement(WbxmlCodePage.Provision, "Status", "1"),
+                    ]),
+                ]),
+            ]),
+        });
+
+        const response = await command.handle(ctx);
+
+        expect(childText(response!, "Status")).toBe("2");
+        expect(ctx.deviceSyncState.provisioned).toBe(false);
+        expect(update).not.toHaveBeenCalled();
+    });
+
     it("Acknowledges a device's own RemoteWipe completion, clearing the flag but leaving provisioned false.", async () => {
         const command = new ProvisionCommand();
         const update = vi.fn().mockResolvedValue(undefined);

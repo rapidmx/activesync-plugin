@@ -839,7 +839,13 @@ describe("SyncCommand Tests (isolated)", () => {
                 folder: { uid: FOLDER_UID, mailboxUid: "mbx-1", type: FolderType.INBOX },
             });
             await command.handle(buildContext(request()).ctx);
-            expect(folderRepo.find).toHaveBeenCalledWith({ mailboxUid: "mbx-1", type: FolderType.DELETED_ITEMS }, expect.anything());
+            // restapi's `findOrCreateWellKnownFolder` (>= 0.10.0) queries with an explicit oldest-first sort/limit
+            // and passes matching `find()` options, rather than the bare `{ mailboxUid, type }` + generic options
+            // this assertion originally expected.
+            expect(folderRepo.find).toHaveBeenCalledWith(
+                { mailboxUid: "mbx-1", type: FolderType.DELETED_ITEMS, sort: { dateCreated: "ASC", uid: "ASC" }, limit: 1 },
+                { ignoreACL: true, limit: 1, skipCache: true },
+            );
             expect(movingRepo.update).toHaveBeenCalledWith(
                 { uid: "msg-1", version: 3, folderUid: "deleted-items" },
                 message,

@@ -8,10 +8,12 @@ import {
     ApiErrors,
     HttpRequest,
     HttpResponse,
+    isDuplicateKeyError,
     ObjectFactory,
     RepoUtils,
     RouteDecorators,
 } from "@rapidrest/service-core";
+import { timingSafeEqualStrings } from "./CryptoUtils.js";
 import { WbxmlDecodeError, WbxmlDecoder } from "./codec/WbxmlDecoder.js";
 import { WbxmlEncoder } from "./codec/WbxmlEncoder.js";
 import type { WbxmlElement } from "./codec/WbxmlElement.js";
@@ -213,7 +215,12 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
         // is sent back through Provision with the same 449 rather than being served.
         if (!this.exemptFromProvisioning(cmd, request)) {
             const presentedKey: string | undefined = firstQueryValue(req.headers["x-ms-policykey"]) ?? policyKey;
-            if (!deviceSyncState.provisioned || !deviceSyncState.policyKey || presentedKey !== deviceSyncState.policyKey) {
+            if (
+                !deviceSyncState.provisioned ||
+                !deviceSyncState.policyKey ||
+                !presentedKey ||
+                !timingSafeEqualStrings(presentedKey, deviceSyncState.policyKey)
+            ) {
                 res.status(HTTP_STATUS_RETRY_WITH).send();
                 return;
             }
@@ -296,6 +303,25 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             folderSyncKeys: {},
             provisioned: false,
         });
-        return await this.deviceSyncStateRepo!.create(instance, { ignoreACL: true });
+        try {
+            return await this.deviceSyncStateRepo!.create(instance, { ignoreACL: true });
+        } catch (err) {
+            // TOCTOU: two concurrent first requests from the same (mailbox, deviceId) can both see no existing
+            // row above and both reach here. The unique index on (mailboxUid, deviceId) lets only one `create()`
+            // win; the loser hits a duplicate-key error (surfaced by `RepoUtils.create()` as
+            // `ApiErrors.IDENTIFIER_EXISTS`, or the raw driver error if some other layer throws first). Rather
+            // than fail the request, transparently read back the winner's row - it's the same logical state a
+            // request arriving a moment later would have found via the `find()` above.
+            if (err instanceof ApiError ? err.code === ApiErrors.IDENTIFIER_EXISTS : isDuplicateKeyError(err)) {
+                const winner: D[] = await this.deviceSyncStateRepo!.find(
+                    { mailboxUid, deviceId },
+                    { ignoreACL: true, limit: 1 },
+                );
+                if (winner[0]) {
+                    return winner[0];
+                }
+            }
+            throw err;
+        }
     }
 }

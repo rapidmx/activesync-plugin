@@ -267,6 +267,8 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
                     importance: MessageImportance.NORMAL,
                     inReplyTo: original?.messageId,
                     references: original ? [...original.references, original.messageId] : [],
+                    /* v8 ignore next -- unreachable via real mailparser output: simpleParser() always initializes
+                     * `attachments` to `[]`, never leaves it undefined, so the `?.`/`?? 0` fallback never fires */
                     hasAttachments: (parsed.attachments?.length ?? 0) > 0,
                 } as any),
                 { ignoreACL: true, user: ctx.user },

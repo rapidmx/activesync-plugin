@@ -297,6 +297,63 @@ describe("EasCollectionLease Tests", () => {
         await failing!();
     });
 
+    it("forgetClient() only clears the map entry if it still matches the pending promise being forgotten.", () => {
+        const stale = Promise.resolve({} as any);
+        const current = Promise.resolve({} as any);
+        (EasCollectionLease as any).clients.set("url-x", current);
+
+        (EasCollectionLease as any).forgetClient("url-x", stale);
+
+        // A newer client already replaced the stale one for this URL - it must survive being "forgotten" by a
+        // late callback that still references the older promise.
+        expect((EasCollectionLease as any).clients.get("url-x")).toBe(current);
+    });
+
+    it("Releasing an in-process lease resolves without clearing a key that something else has since taken over.", async () => {
+        const release = await EasCollectionLease.acquire("k-release-race", { ttlMs: 1000, waitMs: 0 });
+        expect(release).toBeDefined();
+        const replacement = new Promise<void>(() => undefined);
+        (EasCollectionLease as any).local.set("k-release-race", replacement);
+
+        await release!();
+
+        // This release's own local entry was already superseded, so it must leave the replacement in place rather
+        // than evicting whoever holds the key now.
+        expect((EasCollectionLease as any).local.get("k-release-race")).toBe(replacement);
+        (EasCollectionLease as any).local.delete("k-release-race");
+    });
+
+    it("Ignores a late SET that resolves without acquiring the key, because another copy took it first.", async () => {
+        let open!: () => void;
+        redis.setGate = new Promise<void>((resolve) => (open = resolve));
+
+        const release = await EasCollectionLease.acquire("k", { redisUrl: "redis://fake", ttlMs: 1000, waitMs: 15_000, redisTimeoutMs: 20 });
+        expect(release).toBeDefined(); // failed open: the gated SET hasn't answered within redisTimeoutMs
+
+        // Another copy claims the key before the gated SET is finally allowed to resolve.
+        redis.keys.set("eas:lease:k", "another-copy");
+        open();
+        await tick(10);
+        // The late SET saw NX fail (the key was already taken), so nothing was released - the other copy's key stands.
+        expect(redis.keys.get("eas:lease:k")).toBe("another-copy");
+        await release!();
+    });
+
+    it("Falls back to a 100ms poll interval between SET attempts when pollMs isn't configured.", async () => {
+        redis.keys.set("eas:lease:k", "another-copy");
+        const acquiring = EasCollectionLease.acquire("k", { redisUrl: "redis://fake", ttlMs: 1000, waitMs: 150, redisTimeoutMs: 5_000 });
+
+        await tick(30);
+        // Still within the default ~100ms poll delay, so no second SET attempt yet.
+        expect(redis.setCalls).toBe(1);
+
+        redis.keys.delete("eas:lease:k");
+        const release = await acquiring;
+        expect(release).toBeDefined();
+        expect(redis.setCalls).toBeGreaterThanOrEqual(2);
+        await release!();
+    });
+
     it("Replaces a client whose reconnects gave up, failing open meanwhile.", async () => {
         const first = await EasCollectionLease.acquire("k", { redisUrl: "redis://fake", ttlMs: 1000, waitMs: 0 });
         await first!();

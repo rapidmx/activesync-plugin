@@ -25,6 +25,16 @@ export const WBXML_DEFAULT_MAX_CHILDREN_PER_ELEMENT = 10_000;
  * the decoder's recursion, so it needs its own bound; real EAS documents stay well under 20 levels. */
 export const WBXML_DEFAULT_MAX_DEPTH = 64;
 
+/** Default cap on the total number of UTF-8 bytes decoded from `STR_I` (inline string) tokens across one
+ * document. `maxElements`/`maxChildrenPerElement`/`maxDepth` all bound the document's *shape*, but none of them
+ * bound the content a single `STR_I` payload can carry: one text-bearing field (an Email `Subject`, a Contact's
+ * notes `Body`, ...) can otherwise run up to the full request-body cap while the document still reports well
+ * within every other limit. That's a poison-pill risk against a 16 MB Mongo document-size cap (an oversized
+ * field embedded in a stored document can never be written, so it fails identically on every retry) and an
+ * egress-multiplication risk (the same oversized text is re-served on every future sync round). Comfortably
+ * below `BaseEasRoute`'s request-body cap, generous for any real Subject/Body/note content a device sends. */
+export const WBXML_DEFAULT_MAX_INLINE_STRING_BYTES = 4 * 1024 * 1024;
+
 /** Limits applied by `WbxmlDecoder`. Every value must be a positive integer; omitted values use the defaults. */
 export interface WbxmlDecoderOptions {
     /** Maximum total elements in the document. Default `WBXML_DEFAULT_MAX_ELEMENTS`. */
@@ -33,6 +43,10 @@ export interface WbxmlDecoderOptions {
     maxChildrenPerElement?: number;
     /** Maximum nesting depth (root = 1). Default `WBXML_DEFAULT_MAX_DEPTH`. */
     maxDepth?: number;
+    /** Maximum total `STR_I` (inline string) UTF-8 bytes across the whole document. Default
+     * `WBXML_DEFAULT_MAX_INLINE_STRING_BYTES`. Independent of, and in addition to, the request-body-size check
+     * `BaseEasRoute` performs before decoding even begins. */
+    maxInlineStringBytes?: number;
 }
 
 /** Thrown by `WbxmlDecoder.decode()` for malformed or unsupported input (truncated buffer, unterminated string,
@@ -45,8 +59,8 @@ export class WbxmlDecodeError extends Error {
 }
 
 /** Thrown by `WbxmlDecoder.decode()` when a document exceeds a configured resource limit (element count,
- * children per element, or nesting depth). A subclass of `WbxmlDecodeError`, so callers that treat every
- * decoder failure as a bad request can catch just the base class. */
+ * children per element, nesting depth, or total inline-string bytes). A subclass of `WbxmlDecodeError`, so
+ * callers that treat every decoder failure as a bad request can catch just the base class. */
 export class WbxmlLimitError extends WbxmlDecodeError {
     constructor(message: string) {
         super(message);
@@ -69,9 +83,10 @@ function positiveIntOption(name: string, value: number | undefined, fallback: nu
  * inverse of `WbxmlEncoder`. Reads the fixed EAS document header, skips its (always-empty, in real
  * ActiveSync traffic) string table, then parses the single root element.
  *
- * Input is untrusted, so decoding is bounded: total elements, children per element and nesting depth are
- * capped (see `WbxmlDecoderOptions`), throwing `WbxmlLimitError` when exceeded; all other malformed input throws
- * `WbxmlDecodeError`. Text and opaque payloads are bounded by the input buffer itself.
+ * Input is untrusted, so decoding is bounded: total elements, children per element, nesting depth and the
+ * cumulative bytes of inline-string (`STR_I`) content are all capped (see `WbxmlDecoderOptions`), throwing
+ * `WbxmlLimitError` when exceeded; all other malformed input throws `WbxmlDecodeError`. Opaque payloads are
+ * bounded by the input buffer itself only.
  *
  * The `publicid` header field is read via the same generic `mb_u_int32` reader used everywhere else, which is
  * only a partial implementation of the full WBXML spec for that field (a raw leading `0x00` byte would
@@ -85,11 +100,13 @@ export class WbxmlDecoder {
     private readonly maxElements: number;
     private readonly maxChildrenPerElement: number;
     private readonly maxDepth: number;
+    private readonly maxInlineStringBytes: number;
     private buf: Buffer = Buffer.alloc(0);
     private pos = 0;
     private currentPage = 0;
     private depth = 0;
     private elementCount = 0;
+    private inlineStringBytes = 0;
 
     constructor(options: WbxmlDecoderOptions = {}) {
         this.maxElements = positiveIntOption("maxElements", options.maxElements, WBXML_DEFAULT_MAX_ELEMENTS);
@@ -99,6 +116,11 @@ export class WbxmlDecoder {
             WBXML_DEFAULT_MAX_CHILDREN_PER_ELEMENT,
         );
         this.maxDepth = positiveIntOption("maxDepth", options.maxDepth, WBXML_DEFAULT_MAX_DEPTH);
+        this.maxInlineStringBytes = positiveIntOption(
+            "maxInlineStringBytes",
+            options.maxInlineStringBytes,
+            WBXML_DEFAULT_MAX_INLINE_STRING_BYTES,
+        );
     }
 
     public decode(data: Buffer): WbxmlElement {
@@ -107,6 +129,7 @@ export class WbxmlDecoder {
         this.currentPage = 0;
         this.depth = 0;
         this.elementCount = 0;
+        this.inlineStringBytes = 0;
 
         try {
             this.readByte(); // version - not validated; every ActiveSync client/server variant this library
@@ -165,6 +188,15 @@ export class WbxmlDecoder {
         const end = this.buf.indexOf(0x00, start);
         if (end < 0) {
             throw new WbxmlDecodeError("WbxmlDecoder: unterminated inline string (STR_I)");
+        }
+        // Counted in raw UTF-8 bytes (not decoded JS string length) against a document-wide total, independent
+        // of and in addition to any per-tag/depth/child limit: none of those bound how much text a single
+        // STR_I payload - or several summed together - can carry. See WBXML_DEFAULT_MAX_INLINE_STRING_BYTES.
+        this.inlineStringBytes += end - start;
+        if (this.inlineStringBytes > this.maxInlineStringBytes) {
+            throw new WbxmlLimitError(
+                `WbxmlDecoder: exceeded maximum inline string (STR_I) total of ${this.maxInlineStringBytes} bytes`,
+            );
         }
         this.pos = end + 1; // skip the null terminator
         return this.buf.toString("utf-8", start, end);
