@@ -4,13 +4,12 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ACLAction, ACLUtils, ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
-import type { Folder, Message } from "@rapidmx/restapi";
+import { asEntity, hasMailAccess, type Folder, type Message } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import { type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
-import { asEntity } from "../RestapiCompat.js";
-const { Init, Inject } = ObjectDecorators;
+const { Config, Init, Inject } = ObjectDecorators;
 
 /** [MS-ASCMD] `MoveItems` `Status` codes (section 2.2.3.177.10): `3` is success - not `1`, which means an invalid
  * source. */
@@ -60,6 +59,11 @@ export abstract class MoveItemsCommand implements EasCommandHandler {
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
 
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
+
     @Init
     public async init(): Promise<void> {
         this.messageRepo = await this._objectFactory!.newInstance(RepoUtils, {
@@ -101,10 +105,10 @@ export abstract class MoveItemsCommand implements EasCommandHandler {
         const message: Message | undefined = await this.messageRepo!.findOne(srcMsgId, { ignoreACL: true });
         // The client's claimed SrcFldId must match where the message actually lives - protects against a
         // stale/mismatched client cache rather than trusting the claim outright.
-        if (!message || message.folderUid !== srcFldId || !(await this.aclUtils!.hasPermission(ctx.user, srcFldId, ACLAction.UPDATE))) {
+        if (!message || message.folderUid !== srcFldId || !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, srcFldId, ACLAction.UPDATE))) {
             return this.responseElement(srcMsgId, STATUS_INVALID_SOURCE, undefined);
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, dstFldId, ACLAction.CREATE))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, dstFldId, ACLAction.CREATE))) {
             return this.responseElement(srcMsgId, STATUS_INVALID_DESTINATION, undefined);
         }
 

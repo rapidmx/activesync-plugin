@@ -9,8 +9,10 @@ import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ObjectFactory, RepoUt
 import { ScanPipeline } from "@rapidmx/restapi/scan";
 import {
     BlobStore,
+    boundIndexedValue,
     findOrCreateWellKnownFolder,
     FolderType,
+    hasMailAccess,
     type Mailbox,
     type Message,
     MessageImportance,
@@ -22,9 +24,8 @@ import {
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { checkComposedOriginators, extractOriginatorHeaders, stripHeader } from "../MimeHeaderUtils.js";
-import { boundIndexedValue } from "../RestapiCompat.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
-const { Init, Inject, Logger } = ObjectDecorators;
+const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Most envelope recipients (To + Cc + Bcc) one composed message may carry. */
 export const MAX_COMPOSE_RECIPIENTS = 500;
@@ -120,6 +121,11 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
 
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
+
     @Logger
     private logger: any;
 
@@ -175,7 +181,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
             if (!found) {
                 throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
             }
-            if (!(await this.aclUtils!.hasPermission(ctx.user, found.folderUid, ACLAction.READ))) {
+            if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, found.folderUid, ACLAction.READ))) {
                 throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
             }
             original = found;
@@ -278,7 +284,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         if (original) {
             // The message is already on its way - flagging the original is best-effort bookkeeping.
             try {
-                if (await this.aclUtils!.hasPermission(ctx.user, original.folderUid, ACLAction.UPDATE)) {
+                if (await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, original.folderUid, ACLAction.UPDATE)) {
                     await this.markOriginal(ctx, original);
                 }
             } catch (err: any) {

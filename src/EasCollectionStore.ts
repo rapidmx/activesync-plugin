@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import type { RepoUtils } from "@rapidrest/service-core";
+import { asEntity } from "@rapidmx/restapi";
 import type { EasCollectionChunk } from "./models/EasCollectionChunk.js";
 import type { EasCollectionState } from "./models/EasCollectionState.js";
-import { asEntity } from "./RestapiCompat.js";
 
 /** Largest held set kept inline on the `EasCollectionState` row (`serverIds`) - past it the set moves to chunk rows. */
 export const INLINE_HELD_LIMIT = 2000;

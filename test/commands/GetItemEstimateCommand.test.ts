@@ -16,6 +16,7 @@ import { childText, element, findChild, findChildren, textElement } from "../../
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { formatSyncKey } from "../../src/EasSyncKeyUtils.js";
 import { MAX_SYNC_COLLECTIONS } from "../../src/commands/SyncCommand.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 describe("GetItemEstimateCommand Tests (guard clause only)", () => {
     it("handle() throws INTERNAL_ERROR when a required dependency is not set.", async () => {
@@ -127,6 +128,16 @@ describe("GetItemEstimateCommand Tests (guard clause only)", () => {
             const staleResponse = findChildren(stale, "Response")[0];
             expect(childText(staleResponse, "Status")).toBe("2");
             expect(findChild(findChild(staleResponse, "Collection")!, "Estimate")).toBeUndefined();
+        });
+
+        it("Trusted-role bypass regression: an admin-role stranger with no grant on the folder gets Status 2, not counted via the role.", async () => {
+            const { command, repo } = build();
+            command.aclUtils = fakeMailAclUtils({});
+
+            const response = await command.handle({ user: TRUSTED_STRANGER_USER, mailboxUid: "m1", deviceId: "d1", request: estimateRequest("0") } as any);
+
+            expect(childText(findChild(response, "Response")!, "Status")).toBe("2");
+            expect(repo.count).not.toHaveBeenCalled();
         });
     });
 });

@@ -13,6 +13,7 @@ import { MoveItemsCommandMongo } from "../../src/commands/mongo/MoveItemsCommand
 import { childText, element, findChildren, textElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 describe("MoveItemsCommand Tests (isolated)", () => {
     it("Returns an empty MoveItems response with no Move elements when the request body is absent.", async () => {
@@ -106,5 +107,36 @@ describe("MoveItemsCommand Tests (isolated)", () => {
             ["locked", "7", undefined],
             ["fine", "3", "fine"],
         ]);
+    });
+
+    describe("Trusted-role (admin) bypass regression - a trusted role must never substitute for a real ACL grant", () => {
+        const move = (srcFldId: string, dstFldId: string) =>
+            element(WbxmlCodePage.Move, "Move", [
+                textElement(WbxmlCodePage.Move, "SrcMsgId", "m1"),
+                textElement(WbxmlCodePage.Move, "SrcFldId", srcFldId),
+                textElement(WbxmlCodePage.Move, "DstFldId", dstFldId),
+            ]);
+
+        it("A trusted-role stranger with only READ on the source folder (a real delegate grant) still gets Status 1 - UPDATE isn't substituted by the role.", async () => {
+            const command = new ObjectFactory(config, Logger()).newInstance<MoveItemsCommandMongo>(MoveItemsCommandMongo, { initialize: false }) as any;
+            command.messageRepo = { findOne: vi.fn().mockResolvedValue({ uid: "m1", version: 1, folderUid: "inbox", mailboxUid: "mbx" }) };
+            command.folderRepo = { findOne: vi.fn().mockResolvedValue({ uid: "archive", mailboxUid: "mbx" }) };
+            command.aclUtils = fakeMailAclUtils({ inbox: { [TRUSTED_STRANGER_USER.uid]: ["read"] }, archive: { [TRUSTED_STRANGER_USER.uid]: ["read", "create"] } });
+
+            const response = await command.handle({ user: TRUSTED_STRANGER_USER, request: element(WbxmlCodePage.Move, "MoveItems", [move("inbox", "archive")]) });
+
+            expect(childText(findChildren(response, "Response")[0], "Status")).toBe("1");
+        });
+
+        it("A trusted-role stranger with UPDATE on the source but no grant on the destination still gets Status 2 - CREATE isn't substituted by the role.", async () => {
+            const command = new ObjectFactory(config, Logger()).newInstance<MoveItemsCommandMongo>(MoveItemsCommandMongo, { initialize: false }) as any;
+            command.messageRepo = { findOne: vi.fn().mockResolvedValue({ uid: "m1", version: 1, folderUid: "inbox", mailboxUid: "mbx" }) };
+            command.folderRepo = { findOne: vi.fn().mockResolvedValue({ uid: "archive", mailboxUid: "mbx" }) };
+            command.aclUtils = fakeMailAclUtils({ inbox: { [TRUSTED_STRANGER_USER.uid]: ["update"] } });
+
+            const response = await command.handle({ user: TRUSTED_STRANGER_USER, request: element(WbxmlCodePage.Move, "MoveItems", [move("inbox", "archive")]) });
+
+            expect(childText(findChildren(response, "Response")[0], "Status")).toBe("2");
+        });
     });
 });

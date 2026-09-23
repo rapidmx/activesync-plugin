@@ -83,6 +83,9 @@ describe("MimeHeaderUtils Tests", () => {
             ["From: =?utf-8?q?me=40example.com?= <me@example.com>"],
             ['From: "Me (me@example.com)" <me@example.com>'],
             ["From: me@example.com: alias@example.com;"],
+            // A backslash-escaped character inside the quoted display name itself (not just outside it, as in the
+            // "accepts the mailbox's own addresses" test above) - still decodes to the sender's own address.
+            ['From: "me\\@example.com" <me@example.com>'],
         ]) {
             expect(checkComposedOriginators(message(...headers), own)).toBeUndefined();
         }

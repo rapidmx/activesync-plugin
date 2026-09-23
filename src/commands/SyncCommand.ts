@@ -12,7 +12,16 @@ import {
     RepoUtils,
     type RecoverableBaseEntity,
 } from "@rapidrest/service-core";
-import { AuditAction, findOrCreateWellKnownFolder, type Folder, FolderType, RecoverableRepoUtils, type Mailbox } from "@rapidmx/restapi";
+import {
+    asEntity,
+    AuditAction,
+    findOrCreateWellKnownFolder,
+    hasMailAccess,
+    type Folder,
+    FolderType,
+    RecoverableRepoUtils,
+    type Mailbox,
+} from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { formatSyncKey } from "../EasSyncKeyUtils.js";
@@ -28,7 +37,6 @@ import {
 } from "../EasCollectionSync.js";
 import { type ChunkStore, clearHeldSet, type HeldSet, INLINE_HELD_LIMIT, loadHeldSet, saveHeldSet } from "../EasCollectionStore.js";
 import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
-import { asEntity } from "../RestapiCompat.js";
 import { EasCollectionLease, type LeaseRelease } from "../EasCollectionLease.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
@@ -180,6 +188,12 @@ export abstract class SyncCommand implements EasCommandHandler {
     @Config()
     private config?: any;
 
+    /** Roles `@rapidrest/service-core`'s `ACLUtils.hasPermission()` treats as always-permitted - which must never
+     * apply to another user's mail. Every ACL check below goes through `hasMailAccess()` (restapi's own fix for
+     * the identical issue in its REST routes, `MailAccessUtils.ts`), which strips these roles first. */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
+
     protected moveScanLimit: number = DEFAULT_MOVE_SCAN_LIMIT;
     protected reconcileLimit: number = DEFAULT_RECONCILE_LIMIT;
     protected leaseWaitMs: number = LEASE_WAIT_MS;
@@ -297,7 +311,7 @@ export abstract class SyncCommand implements EasCommandHandler {
 
         // A folder the caller can't even read is reported identically to an unrecognized collection - never
         // reveal whether a client-supplied CollectionId belonging to someone else's mailbox actually exists.
-        if (!folderUid || !(await this.aclUtils!.hasPermission(ctx.user, folderUid, ACLAction.READ))) {
+        if (!folderUid || !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folderUid, ACLAction.READ))) {
             return this.collectionResponse(requestedClass, folderUid, "4", clientSyncKey);
         }
         const folder: (Folder & { uid: string }) | undefined = await this.folderRepo!.findOne(folderUid, { ignoreACL: true });
@@ -635,7 +649,7 @@ export abstract class SyncCommand implements EasCommandHandler {
         if (round.collectionClass === "Email" && folder.type !== FolderType.DRAFTS) {
             return this.addResponseElement(clientId, undefined, "6");
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, folder.uid, ACLAction.CREATE))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folder.uid, ACLAction.CREATE))) {
             return this.addResponseElement(clientId, undefined, "6");
         }
         try {
@@ -671,7 +685,7 @@ export abstract class SyncCommand implements EasCommandHandler {
         if (!existing || existing.folderUid !== folder.uid) {
             return this.statusResponseElement("Change", serverId, "8");
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, folder.uid, ACLAction.UPDATE))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folder.uid, ACLAction.UPDATE))) {
             return this.statusResponseElement("Change", serverId, "6");
         }
         const appData = findChild(el, "ApplicationData");
@@ -706,7 +720,7 @@ export abstract class SyncCommand implements EasCommandHandler {
             }
             return this.statusResponseElement("Delete", serverId, "8");
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, folder.uid, ACLAction.DELETE))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folder.uid, ACLAction.DELETE))) {
             return this.statusResponseElement("Delete", serverId, "6");
         }
         // Like restapi's delete (409), never while a send of the message is in flight - a moved or deleted message could

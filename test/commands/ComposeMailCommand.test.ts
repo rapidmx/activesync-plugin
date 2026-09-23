@@ -16,6 +16,7 @@ import { stripHeader } from "../../src/commands/ComposeMailCommand.js";
 import { childText, element, opaqueElement, textElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 describe("ComposeMailCommand Tests (guard clauses only)", () => {
     const objectFactory = new ObjectFactory(config, Logger());
@@ -137,6 +138,30 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
         const response = await (command as any).handle({ mailboxUid: "mbx", request });
 
         expect(childText(response, "Status")).toBe("119");
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it("handle() refuses a Source whose message the trusted-role caller has no ACL grant on, with 403 (READ isn't substituted by the role).", async () => {
+        const send = vi.fn();
+        const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com", aliasAddresses: [] }) };
+        const messageRepo = { findOne: vi.fn().mockResolvedValue({ uid: "orig-1", folderUid: "inbox", references: [], messageId: "<orig@example.com>" }) };
+        const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+        Object.assign(command as any, {
+            folderRepo: {},
+            messageRepo,
+            mailboxRepo,
+            blobStore: {},
+            mailTransport: { send },
+            scanPipeline: {},
+            aclUtils: fakeMailAclUtils({}),
+        });
+        const mime = Buffer.from(["From: me@example.com", "To: you@example.com", "Subject: Hi", "", "Body"].join("\r\n"));
+        const request = element(WbxmlCodePage.ComposeMail, "SmartReply", [
+            element(WbxmlCodePage.ComposeMail, "Source", [textElement(WbxmlCodePage.ComposeMail, "ItemId", "orig-1")]),
+            opaqueElement(WbxmlCodePage.ComposeMail, "MIME", mime),
+        ]);
+
+        await expect((command as any).handle({ mailboxUid: "mbx", user: TRUSTED_STRANGER_USER, request })).rejects.toMatchObject({ status: 403 });
         expect(send).not.toHaveBeenCalled();
     });
 

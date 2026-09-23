@@ -17,6 +17,7 @@ import { MAX_MEETING_RESPONSES } from "../../src/commands/MeetingResponseCommand
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 const MAILBOX = { uid: "mbx-1", primarySmtpAddress: "me@example.com", aliasAddresses: [], displayName: "Me" };
 
@@ -75,8 +76,8 @@ function build(overrides: { calendarEventRepo?: any; messageRepo?: any; aclUtils
     return { command, calendarEventRepo, mailTransport, logger };
 }
 
-function ctx(req: WbxmlElement | undefined): EasCommandContext {
-    return { user: { uid: "user-1", roles: [], scopes: [] }, mailboxUid: "mbx-1", request: req } as unknown as EasCommandContext;
+function ctx(req: WbxmlElement | undefined, user: any = { uid: "user-1", roles: [], scopes: [] }): EasCommandContext {
+    return { user, mailboxUid: "mbx-1", request: req } as unknown as EasCommandContext;
 }
 
 function statuses(response: WbxmlElement | undefined): string[] {
@@ -375,6 +376,34 @@ describe("MeetingResponseCommand Tests (isolated)", () => {
             await command.handle(ctx(request(reply("1", "event-1"))));
 
             expect(calendarEventRepo.update.mock.calls[0][1]).toBeInstanceOf(FakeEntity);
+        });
+    });
+
+    describe("Trusted-role (admin) bypass regression - a trusted role must never substitute for a real ACL grant", () => {
+        it("A trusted-role stranger with no grant on the event's folder gets Status 2 - UPDATE isn't substituted by the role.", async () => {
+            const aclUtils = fakeMailAclUtils({});
+            const { command } = build({ aclUtils });
+
+            expect(statuses(await command.handle(ctx(request(reply("1", "event-1")), TRUSTED_STRANGER_USER)))).toEqual(["2"]);
+        });
+
+        it("A trusted-role stranger with only UPDATE (a real delegate grant) records a decline as a status instead of deleting - DELETE isn't substituted by the role.", async () => {
+            const aclUtils = fakeMailAclUtils({ calendar: { [TRUSTED_STRANGER_USER.uid]: ["update"] } });
+            const { command, calendarEventRepo } = build({ aclUtils });
+
+            const response = await command.handle(ctx(request(reply("3", "event-1")), TRUSTED_STRANGER_USER));
+
+            expect(statuses(response)).toEqual(["1"]);
+            expect(calendarEventRepo.delete).not.toHaveBeenCalled();
+            expect(calendarEventRepo.update.mock.calls[0][0].attendees[0].responseStatus).toBe(AttendeeResponseStatus.DECLINED);
+        });
+
+        it("A trusted-role stranger with no grant on the meeting-request message's folder can't use it to resolve an event - READ isn't substituted by the role.", async () => {
+            const messageRepo = { findOne: vi.fn().mockResolvedValue({ uid: "invite", folderUid: "inbox", bodyBlobKey: "invite" }) };
+            const aclUtils = fakeMailAclUtils({});
+            const { command } = build({ messageRepo, aclUtils });
+
+            expect(statuses(await command.handle(ctx(request(reply("1", "invite")), TRUSTED_STRANGER_USER)))).toEqual(["2"]);
         });
     });
 });

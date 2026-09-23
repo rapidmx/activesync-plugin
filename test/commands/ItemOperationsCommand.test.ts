@@ -18,6 +18,7 @@ import { childText, element, findChild, opaqueElement, textElement } from "../..
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { createHash } from "crypto";
 import { FolderType } from "@rapidmx/restapi";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 describe("ItemOperationsCommand Tests (guard clause only)", () => {
     it("handle() throws INTERNAL_ERROR when a required dependency is not set.", async () => {
@@ -159,6 +160,32 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
             await expect(command.handle(ctx(request))).rejects.toMatchObject({ status: 404 });
             expect(messageRepo.find).not.toHaveBeenCalled();
         });
+
+        it("EmptyFolderContents: a trusted-role stranger with only READ (a real delegate grant) on the folder still gets 403 on DELETE, not let through by the role.", async () => {
+            const { command } = build(messages(1), new Set());
+            command.aclUtils = fakeMailAclUtils({ f1: { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+            const adminCtx = { user: TRUSTED_STRANGER_USER, mailboxUid: "mbx", request: empty() } as unknown as EasCommandContext;
+
+            await expect(command.handle(adminCtx)).rejects.toMatchObject({ status: 403 });
+        });
+
+        it("Move: a trusted-role stranger with only READ on the destination still gets every move refused (Status 3), not let through by the role.", async () => {
+            const { command, messageRepo } = build(messages(2), new Set());
+            command.aclUtils = fakeMailAclUtils({ dest: { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+            const adminCtx = { user: TRUSTED_STRANGER_USER, mailboxUid: "mbx", request: moveTo("conv") } as unknown as EasCommandContext;
+
+            expect(statusOf(await command.handle(adminCtx))).toBe("3");
+            expect(messageRepo.update).not.toHaveBeenCalled();
+        });
+
+        it("Move: a trusted-role stranger with CREATE on the destination but no grant on the source folder still can't move anything (Status 3).", async () => {
+            const { command, messageRepo } = build(messages(2), new Set());
+            command.aclUtils = fakeMailAclUtils({ dest: { [TRUSTED_STRANGER_USER.uid]: ["create"] } });
+            const adminCtx = { user: TRUSTED_STRANGER_USER, mailboxUid: "mbx", request: moveTo("conv") } as unknown as EasCommandContext;
+
+            expect(statusOf(await command.handle(adminCtx))).toBe("3");
+            expect(messageRepo.update).not.toHaveBeenCalled();
+        });
     });
 
     describe("Round 6: audit of non-owner access", () => {
@@ -268,6 +295,24 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
 
             expect(childText(findChild(findChild(response, "Response")!, "Fetch")!, "Status")).toBe("1");
             expect(command.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to persist audit log entry.*audit store down/));
+        });
+
+        it("Fetch (Message body): a trusted-role stranger with READ elsewhere but not on this folder still gets 403, not let through by the role.", async () => {
+            const { command } = buildAudited();
+            command.aclUtils = fakeMailAclUtils({ "f-own": { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+            const request = element(WbxmlCodePage.ItemOperations, "ItemOperations", [fetchBody("theirs")]);
+            const adminCtx = { user: TRUSTED_STRANGER_USER, mailboxUid: "mbx", deviceId: "dev-9", request } as unknown as EasCommandContext;
+
+            await expect(command.handle(adminCtx)).rejects.toMatchObject({ status: 403 });
+        });
+
+        it("Fetch (Attachment): a trusted-role stranger with no grant at all on the owning message's folder still gets 403, not let through by the role.", async () => {
+            const { command } = buildAudited();
+            command.aclUtils = fakeMailAclUtils({});
+            const request = element(WbxmlCodePage.ItemOperations, "ItemOperations", [fetchAttachment("att-theirs")]);
+            const adminCtx = { user: TRUSTED_STRANGER_USER, mailboxUid: "mbx", deviceId: "dev-9", request } as unknown as EasCommandContext;
+
+            await expect(command.handle(adminCtx)).rejects.toMatchObject({ status: 403 });
         });
     });
 });

@@ -9,9 +9,9 @@ import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, opaqueElement, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCollectionSyncAdapter } from "./EasCollectionSyncAdapter.js";
 import { isGenuineDraft } from "../MessageMoveRules.js";
-import { boundIndexedValue } from "../RestapiCompat.js";
 import {
     type BlobStore,
+    boundIndexedValue,
     type Folder,
     type Label,
     type Mailbox,

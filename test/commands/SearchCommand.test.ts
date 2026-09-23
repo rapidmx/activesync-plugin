@@ -13,6 +13,7 @@ import { SearchCommandMongo } from "../../src/commands/mongo/SearchCommandMongo.
 import { element, findChild, findChildren, childText, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 function galRequest(query: string): WbxmlElement {
     return element(WbxmlCodePage.Search, "Search", [
@@ -160,5 +161,27 @@ describe("SearchCommand Tests", () => {
         });
         await ownOnly.handle({ user: { uid: "user-1" }, mailboxUid: "mbx-1", request: mailboxRequest("x") } as unknown as EasCommandContext);
         expect((ownOnly as any).mailboxRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it("Mailbox: a trusted-role stranger with only READ (a real delegate grant) on one folder still sees just that folder's hits - the role never widens READ.", async () => {
+        const messages = [
+            { uid: "m1", folderUid: "f1", mailboxUid: "mbx-1" },
+            { uid: "m2", folderUid: "f2", mailboxUid: "mbx-1" },
+        ];
+        const messageFind = vi.fn(async (query: any) => {
+            const uids: string[] = /^in\((.*)\)$/.exec(query.uid)![1].split(",");
+            return messages.filter((message) => uids.includes(message.uid));
+        });
+        const aclUtils = fakeMailAclUtils({ f1: { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+        const searchProvider = {
+            search: vi.fn().mockResolvedValue({ results: ["m1", "m2"].map((entityUid) => ({ entityType: "message", entityUid, score: 1 })) }),
+        };
+        const command = buildCommand({ messageRepo: { find: messageFind }, aclUtils, searchProvider });
+
+        const response = await command.handle({ user: TRUSTED_STRANGER_USER, mailboxUid: "mbx-1", request: mailboxRequest("x") } as unknown as EasCommandContext);
+
+        const store = findChild(findChild(response!, "Response")!, "Store")!;
+        expect(childText(store, "Total")).toBe("1");
+        expect(findChildren(store, "Result").map((result) => childText(result, "ServerId"))).toEqual(["m1"]);
     });
 });

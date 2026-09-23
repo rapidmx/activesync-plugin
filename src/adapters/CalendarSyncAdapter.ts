@@ -7,11 +7,11 @@ import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { fromCompactDateTime, toCompactDateTime } from "../CompactDateTime.js";
 import type { EasCollectionSyncAdapter } from "./EasCollectionSyncAdapter.js";
-import { boundIndexedValue } from "../RestapiCompat.js";
 import { isPlainAddress, safeDisplayName } from "../MimeHeaderUtils.js";
 import {
     AttendeeResponseStatus,
     AttendeeRole,
+    boundIndexedValue,
     BusyStatus,
     type CalendarEvent,
     type RecurrenceRule,

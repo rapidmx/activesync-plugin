@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
-import { type Folder, RecoverableRepoUtils } from "@rapidmx/restapi";
+import { type Folder, hasMailAccess, RecoverableRepoUtils } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { classForFolderType, enumerateCollection, filterPredicate, workingStateFromRow } from "../EasCollectionSync.js";
@@ -68,6 +68,11 @@ export abstract class GetItemEstimateCommand implements EasCommandHandler {
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
+
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
 
     private repos = new Map<string, RepoUtils<any>>();
     private folderRepo?: RepoUtils<any>;
@@ -135,7 +140,7 @@ export abstract class GetItemEstimateCommand implements EasCommandHandler {
         const clientSyncKey: string | undefined = childText(collectionEl, "SyncKey");
 
         // Never count against a folder the caller can't even read - see this class's own doc comment.
-        if (!folderUid || !(await this.aclUtils!.hasPermission(ctx.user, folderUid, ACLAction.READ))) {
+        if (!folderUid || !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folderUid, ACLAction.READ))) {
             return this.statusResponse("2");
         }
         const folder: (Folder & { uid: string }) | undefined = await this.folderRepo!.findOne(folderUid, { ignoreACL: true });

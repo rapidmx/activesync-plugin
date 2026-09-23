@@ -4,8 +4,8 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { ApiError } from "@rapidrest/core";
 import { ApiErrors, type RecoverableBaseEntity, type RepoUtils } from "@rapidrest/service-core";
+import { asEntity } from "@rapidmx/restapi";
 import type { DeviceSyncState } from "./models/DeviceSyncState.js";
-import { asEntity } from "./RestapiCompat.js";
 
 /**
  * A position in a `(dateModified, uid)`-ordered change stream. `dateModified` alone is not a total order - several

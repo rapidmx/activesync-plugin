@@ -49,6 +49,79 @@ Keep entries terse — this is a reference, not a transcript.
   this to be gotten wrong in the first place (see `@rapidrest/cli`'s own NOTES.md, 2026-09-07 entry,
   for the full incident writeup and the `CHANGELOG_NOISE_PATTERNS` fix that accompanied it).
 
+### 2026-09-22 (2) — Round-9: trusted-role ACL bypass across every mailbox-scoped command, plus two cleanups
+
+A second-round review of the Round-8 commit (`6a394df`) confirmed those three fixes and the restapi bump were
+solid, but surfaced one significant new finding and two minor ones. Committed to `main` as a follow-up.
+
+**Threat-model scoping note** (updates the standing decision above): the admin-bypass finding below is judged a
+real, fix-worthy vulnerability, not an excluded "admin-only footgun" - it needs no elevated *intent*, no race, no
+timing, nothing beyond an ordinary authenticated request from any account that happens to carry the platform's
+default trusted role. restapi hit the identical bug in its own REST routes and fixed it (0.17.0) for the same
+reason. The standing "externally-exploitable only" scope still excludes routes gated by genuine platform-admin
+actions (`BaseDeviceSyncStateRoute`'s remote-wipe/unblock, both already legitimately admin-only) - those are
+unaffected and untouched here.
+
+- **1 [HIGH] Every ACL check in this plugin called `aclUtils.hasPermission(ctx.user, uid, action)` with the raw,
+  unstripped caller.** `@rapidrest/service-core`'s `ACLUtils.hasPermission()` unconditionally returns `true` for
+  any caller holding a trusted role (`trusted_roles`, default `["admin"]`) - checked *before* it looks at the
+  actual ACL record. Any account with the default `admin` role (no special grant needed - just the role) could
+  therefore Sync, read, fetch, move, delete or respond to another mailbox's data with well-known-folder uids
+  being deterministically computable. This is restapi's own 0.17.0 finding
+  ("Fixed an administrator with an elevated token reading every user's mail"), never carried over to this
+  plugin's own ACL checks.
+  - Fix: every call site now goes through restapi's `hasMailAccess(aclUtils, trustedRoles, user, uid, action)`
+    (`util/MailAccessUtils.ts`, exported since 0.17.0), which calls `stripTrustedRoles()` on the caller before
+    ever reaching `hasPermission()` - the same idiom restapi's own routes use (confirmed by reading
+    `BaseFolderRoute.ts`). Each command class gained its own `@Config("trusted_roles", ["admin"]) private
+    trustedRoles: string[] = ["admin"];` field (matching `ACLUtils`'s/`RouteUtils`'s own decorator and default,
+    so a deployment that changes the config key affects EAS and REST identically) - there's no shared base class
+    across these command classes to hang one copy of the field on, so it's repeated per class, same as restapi's
+    own per-route `trustedRoles` field.
+  - **20 call sites across 8 files** fixed: `SyncCommand.ts` (READ/CREATE/UPDATE/DELETE on a folder),
+    `ItemOperationsCommand.ts` (Fetch body/attachment READ, EmptyFolderContents DELETE, Move CREATE+UPDATE),
+    `MoveItemsCommand.ts` (UPDATE on source, CREATE on destination), `MeetingResponseCommand.ts` (UPDATE, DELETE,
+    the meeting-request message's READ), `ComposeMailCommand.ts` (Source message READ, `markOriginal` UPDATE),
+    `GetItemEstimateCommand.ts` (READ), `SearchCommand.ts` (Mailbox-store per-folder READ), `PingCommand.ts`
+    (per-folder READ before subscribing).
+  - **Tests**: new `test/mailAccessTestUtils.ts` (`fakeMailAclUtils()`, a minimal `ACLUtils` fake that reproduces
+    the real - and, for mail, unsafe - trusted-role shortcut, so a test can prove a caller's role alone no longer
+    substitutes for a real per-action grant) plus `TRUSTED_STRANGER_USER`/`OWNER_USER`/`PLAIN_STRANGER_USER`
+    fixtures. Added a "Trusted-role (admin) bypass regression" test (or describe block, one or more per distinct
+    action/call site) to each of all 8 affected commands' isolated test files, plus one full end-to-end test in
+    `test/routes/mongo/EasRoute.test.ts` using this file's real `admin`/`adminToken` fixture against the actual,
+    unmocked `@rapidrest/service-core` `ACLUtils` and `trusted_roles` config (not a fake standing in for it) -
+    an admin-role caller with no ACL grant on another user's folder still gets Sync Status 4, not silently
+    synced. All pre-existing tests kept passing unmodified: none of them asserted on the raw, unstripped
+    `ctx.user` being passed to `hasPermission()` in a way `stripTrustedRoles()`'s identity-preserving fast path
+    (returns the same object when there's nothing to strip) would break.
+- **2 [LOW, cleanup] `RestapiCompat.ts` and `MimeHeaderUtils.ts`'s inline restapi copies were never replaced
+  after the 0.19.0 bump**, despite their own doc comments saying to. Verified byte-identical against restapi's
+  actual installed source first (not assumed): `boundIndexedValue`/`asEntity` (`ConversationUtils.js`/
+  `EntityUtils.js`) and `extractOriginatorHeaders`/`hasAddressLikeDisplayName`/`checkOriginatorHeaders`/
+  `isPlainAddress`/`safeDisplayName` (`MimeHeaderUtils.js`) all matched. Deleted `src/RestapiCompat.ts` entirely,
+  repointing its 12 importers at `@rapidmx/restapi` directly. `src/MimeHeaderUtils.ts` now re-exports those 5
+  functions (plus the `OriginatorHeaders`/`OriginatorHeaderCheckOptions` types) from restapi instead of defining
+  them, but **keeps two of restapi's own private helpers as inline copies** (`quotedStringsAndComments()`,
+  `decodeEncodedWords()`) - restapi doesn't export them, and this plugin's own `checkComposedOriginators()`/
+  `displayTextShowsOnlyAllowedAddresses()` still need them directly, not just the 5 public functions built on
+  top of them. Net: ~300 lines of duplicated restapi source removed, ~40 kept (the two helpers restapi doesn't
+  export). Added a `MimeHeaderUtils.test.ts` case for a backslash-escaped character *inside* an address-showing
+  quoted display name (not just outside it) - the shrunk file's remaining local `quotedStringsAndComments()` had
+  lost its only test coverage of that branch when the now-removed local copies of the 5 public functions (which
+  used to exercise the exact same escape-handling logic from other angles) went away.
+- **3 [LOW, test fix] `ProvisionCommand.test.ts`'s "wrong presented key" loop tested `presented || "x"`, so its
+  empty-string case silently became `"x"` and was never actually exercised.** Not a functional gap (the
+  different-length case already covers `timingSafeEqualStrings()`'s length-mismatch path), but the empty-string
+  input is structurally a *different* branch entirely: `ProvisionCommand.handle()`'s own `!clientPolicyKey` check
+  reads an empty `<PolicyKey/>` the same as a missing one and routes to `issuePolicy()` (Status 1, a fresh key)
+  rather than ever reaching `acknowledgePolicy()`'s comparison. Split into two tests: the mismatch loop now only
+  carries genuinely-wrong, non-empty keys, and a new dedicated test asserts the empty-string case actually takes
+  the issue-a-fresh-policy branch instead of being silently coerced into exercising the wrong code path.
+- Checks: `yarn lint` and `npx tsc --noEmit -p .` clean. `tsc -p tsconfig.test.json` still exactly the documented
+  17 pre-existing errors (unchanged by this round). Full run: 35 files / 851 tests, coverage 100 / 98.39 / 100 /
+  100 (thresholds met).
+
 ### 2026-09-22 — Round-8 review fixes (STR_I byte cap, timing-safe PolicyKey, pairing race) + restapi 0.19.0 bump + coverage
 
 Three new findings fixed, restapi bumped from `^0.10.0` to `^0.19.0` (real compatibility work, not just a

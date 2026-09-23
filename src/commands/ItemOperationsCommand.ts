@@ -5,13 +5,23 @@
 import { simpleParser } from "mailparser";
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
-import { AuditAction, BlobStore, RecoverableRepoUtils, type Attachment, type Folder, type FolderType, type Message } from "@rapidmx/restapi";
+import {
+    AuditAction,
+    asEntity,
+    BlobStore,
+    boundIndexedValue,
+    hasMailAccess,
+    RecoverableRepoUtils,
+    type Attachment,
+    type Folder,
+    type FolderType,
+    type Message,
+} from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, opaqueElement, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { decodeConversationId } from "../adapters/EmailSyncAdapter.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
-import { asEntity, boundIndexedValue } from "../RestapiCompat.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
@@ -149,6 +159,11 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
     @Config("mail:eas:itemoperations_batch_size", DEFAULT_BATCH_SIZE)
     private batchSize: number = DEFAULT_BATCH_SIZE;
 
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
+
     @Init
     public async init(): Promise<void> {
         this.folderRepo = await this._objectFactory!.newInstance(RepoUtils, {
@@ -239,7 +254,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         if (!message) {
             throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, message.folderUid, ACLAction.READ))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.READ))) {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
 
@@ -328,7 +343,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
             // Documented gap, not silently ignored - see this class's own doc comment.
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "DeleteSubFolders is not supported.");
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, requestedFolderUid, ACLAction.DELETE))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, requestedFolderUid, ACLAction.DELETE))) {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
         // The batch query below uses the stored folder's own uid, never the client's string, which a query parser
@@ -415,7 +430,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         if (
             !destFolder ||
             destFolder.mailboxUid !== ctx.mailboxUid ||
-            !(await this.aclUtils!.hasPermission(ctx.user, dstFldId, ACLAction.CREATE))
+            !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, dstFldId, ACLAction.CREATE))
         ) {
             return this.moveResponse("3");
         }
@@ -441,7 +456,9 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         // `update()` opens its own transaction, so concurrent updates fail outright with "cannot start a
         // transaction within a transaction" (confirmed against real SQL test failures, not theoretical) -
         // updates run sequentially in a plain loop instead.
-        const permitted = await Promise.all(messages.map((message) => this.aclUtils!.hasPermission(ctx.user, message.folderUid, ACLAction.UPDATE)));
+        const permitted = await Promise.all(
+            messages.map((message) => hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.UPDATE)),
+        );
         const folderTypes = new Map<string, FolderType | undefined>();
         let moved = 0;
         let failed = 0;
@@ -496,7 +513,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         if (!message) {
             throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
         }
-        if (!(await this.aclUtils!.hasPermission(ctx.user, message.folderUid, ACLAction.READ))) {
+        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.READ))) {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
 

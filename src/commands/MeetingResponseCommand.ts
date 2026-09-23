@@ -9,11 +9,14 @@ import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, ObjectFac
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import {
+    asEntity,
     type Attendee,
     AttendeeResponseStatus,
     type BlobStore,
+    boundIndexedValue,
     buildEventIcs,
     type CalendarEvent,
+    hasMailAccess,
     type Mailbox,
     type Message,
     parseIcsEvent,
@@ -21,9 +24,8 @@ import {
     type TransportResult,
 } from "@rapidmx/restapi";
 import { isOrganizedBy } from "../adapters/CalendarSyncAdapter.js";
-import { asEntity, boundIndexedValue } from "../RestapiCompat.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
-const { Init, Inject, Logger } = ObjectDecorators;
+const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** MS-ASCMD `UserResponse`: 1=Accepted, 2=Tentatively accepted, 3=Declined. */
 const USER_RESPONSE_STATUS: Record<string, AttendeeResponseStatus> = {
@@ -109,6 +111,11 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
     @Inject("MailTransport")
     private mailTransport?: any;
 
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
+
     @Logger
     private logger: any;
 
@@ -165,7 +172,7 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
         }
 
         const event: StoredEvent | undefined = await this.resolveEvent(ctx, requestId);
-        if (!event || !(await this.aclUtils!.hasPermission(ctx.user, event.folderUid, ACLAction.UPDATE))) {
+        if (!event || !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, event.folderUid, ACLAction.UPDATE))) {
             return this.result(requestId, STATUS_INVALID_REQUEST);
         }
 
@@ -190,7 +197,7 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
         }
         let removed = false;
         try {
-            if (userResponse === USER_RESPONSE_DECLINED && (await this.aclUtils!.hasPermission(ctx.user, event.folderUid, ACLAction.DELETE))) {
+            if (userResponse === USER_RESPONSE_DECLINED && (await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, event.folderUid, ACLAction.DELETE))) {
                 if (attendeeCopy && event.cancelNoticeSentAt == null) {
                     await this.calendarEventRepo!.update(
                         { uid: event.uid, version: event.version, cancelNoticeSentAt: new Date() } as any,
@@ -230,7 +237,7 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
             return direct;
         }
         const message: Message | undefined = await this.messageRepo!.findOne(requestId, { ignoreACL: true });
-        if (!message || !(await this.aclUtils!.hasPermission(ctx.user, message.folderUid, ACLAction.READ))) {
+        if (!message || !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.READ))) {
             return undefined;
         }
         const icalUid: string | undefined = await this.meetingUidOf(message);

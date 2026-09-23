@@ -5,7 +5,7 @@
 import { createClient, type RedisClientType } from "redis";
 import { ObjectDecorators } from "@rapidrest/core";
 import { ACLAction, ACLUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
-import { RecoverableRepoUtils } from "@rapidmx/restapi";
+import { hasMailAccess, RecoverableRepoUtils } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
@@ -105,6 +105,11 @@ export class PingCommand implements EasCommandHandler {
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
 
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
+
     /** Supplied by the Mongo/SQL subclasses; without them the pending-change check is skipped. */
     protected collectionStateClass?: any;
     protected collectionBindings: Record<string, PingCollectionBinding> = {};
@@ -197,7 +202,7 @@ export class PingCommand implements EasCommandHandler {
         for (let i = 0; i < folderUids.length; i += ACL_CHECK_CHUNK_SIZE) {
             const chunk = folderUids.slice(i, i + ACL_CHECK_CHUNK_SIZE);
             const permitted = await Promise.all(
-                chunk.map((uid) => this.aclUtils!.hasPermission(ctx.user, uid, ACLAction.READ)),
+                chunk.map((uid) => hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, uid, ACLAction.READ)),
             );
             result.push(...chunk.filter((_uid, j) => permitted[j]));
         }

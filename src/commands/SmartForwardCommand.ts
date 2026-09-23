@@ -4,8 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { ComposeMailCommand } from "./ComposeMailCommand.js";
 import type { EasCommandContext } from "../EasCommandHandler.js";
-import type { Message } from "@rapidmx/restapi";
-import { asEntity } from "../RestapiCompat.js";
+import { asEntity, type Message } from "@rapidmx/restapi";
 
 /**
  * Handles EAS `SmartForward`: relays a freshly composed message threaded to (and referencing) the original via

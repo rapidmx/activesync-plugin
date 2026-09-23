@@ -8,7 +8,7 @@ import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import type { EmailSyncAdapter } from "../adapters/EmailSyncAdapter.js";
-import { AuditAction, type Contact, type Message } from "@rapidmx/restapi";
+import { AuditAction, hasMailAccess, type Contact, type Message } from "@rapidmx/restapi";
 import type { SearchProvider } from "@rapidmx/restapi/search";
 import { boundedEscapedPattern } from "../RegexPatternUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
@@ -118,6 +118,11 @@ export abstract class SearchCommand implements EasCommandHandler {
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
+
+    /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
+     * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
+    @Config("trusted_roles", ["admin"])
+    private trustedRoles: string[] = ["admin"];
 
     @Config("mail:eas:search_default_range", 9)
     private defaultRangeEnd: number = 9;
@@ -262,7 +267,7 @@ export abstract class SearchCommand implements EasCommandHandler {
         const canRead = (folderUid: string): Promise<boolean> => {
             let allowed = folderReadable.get(folderUid);
             if (!allowed) {
-                allowed = this.aclUtils!.hasPermission(ctx.user, folderUid, ACLAction.READ);
+                allowed = hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folderUid, ACLAction.READ);
                 folderReadable.set(folderUid, allowed);
             }
             return allowed;

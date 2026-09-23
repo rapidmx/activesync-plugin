@@ -743,6 +743,78 @@ describe("Route:EasRouteMongo Tests", () => {
         });
     });
 
+    describe("Trusted-role (admin) bypass regression - a trusted role must never substitute for a real ACL grant", () => {
+        it("Sync: an admin-role caller with no ACL grant on another user's folder gets Status 4 end to end, not silently synced via the role.", async () => {
+            // @rapidrest/service-core's real ACLUtils.hasPermission() answers `true` for any caller holding a
+            // trusted role (default trusted_roles ["admin"]) BEFORE it looks at the actual ACL record - so this
+            // test exercises the real, unmocked ACLUtils/trusted_roles config end to end, not a fake standing in
+            // for it. The admin needs their own mailbox to pass BaseEasRoute's own-mailbox resolution before
+            // ever reaching SyncCommand's folder-level check.
+            await createMailbox(admin.uid);
+            const adminDeviceId = "admin-dev-1";
+            const issuePolicy = element(WbxmlCodePage.Provision, "Provision", [
+                element(WbxmlCodePage.Provision, "Policies", [
+                    element(WbxmlCodePage.Provision, "Policy", [textElement(WbxmlCodePage.Provision, "PolicyType", "MS-EAS-Provisioning-WBXML")]),
+                ]),
+            ]);
+            const phase1 = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=Provision&DeviceId=${adminDeviceId}`)
+                .set("Authorization", "jwt " + adminToken)
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(new WbxmlEncoder().encode(issuePolicy));
+            const issued = new WbxmlDecoder().decode(Buffer.from(phase1.body));
+            const policyKey = childText(findChild(findChild(issued, "Policies")!, "Policy")!, "PolicyKey")!;
+            expect(policyKey).toBeTruthy();
+
+            await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=Provision&DeviceId=${adminDeviceId}`)
+                .set("Authorization", "jwt " + adminToken)
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(
+                    new WbxmlEncoder().encode(
+                        element(WbxmlCodePage.Provision, "Provision", [
+                            element(WbxmlCodePage.Provision, "Policies", [
+                                element(WbxmlCodePage.Provision, "Policy", [
+                                    textElement(WbxmlCodePage.Provision, "PolicyType", "MS-EAS-Provisioning-WBXML"),
+                                    textElement(WbxmlCodePage.Provision, "PolicyKey", policyKey),
+                                    textElement(WbxmlCodePage.Provision, "Status", "1"),
+                                ]),
+                            ]),
+                        ]),
+                    ),
+                );
+
+            // The owner's folder carries no ACL grant for the admin at all (see createFolderWithAcl's doc comment).
+            const ownerMailbox = await createMailbox(owner.uid);
+            const inbox = await createFolderWithAcl(ownerMailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+
+            const syncResult = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=Sync&DeviceId=${adminDeviceId}`)
+                .set("Authorization", "jwt " + adminToken)
+                .set("X-MS-PolicyKey", policyKey)
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(
+                    new WbxmlEncoder().encode(
+                        element(WbxmlCodePage.AirSync, "Sync", [
+                            element(WbxmlCodePage.AirSync, "Collections", [
+                                element(WbxmlCodePage.AirSync, "Collection", [
+                                    textElement(WbxmlCodePage.AirSync, "SyncKey", "0"),
+                                    textElement(WbxmlCodePage.AirSync, "CollectionId", inbox.uid),
+                                ]),
+                            ]),
+                        ]),
+                    ),
+                );
+
+            expect(syncResult.status).toBeGreaterThanOrEqual(200);
+            expect(syncResult.status).toBeLessThan(300);
+            const response = new WbxmlDecoder().decode(Buffer.from(syncResult.body));
+            const collection = findChild(findChild(response, "Collections")!, "Collection")!;
+            // Before the fix, the admin role alone would have let this through as Status 1 with a fresh SyncKey.
+            expect(childText(collection, "Status")).toBe("4");
+        });
+    });
+
     describe("FolderSync command", () => {
         it("Treats a request sent with no WBXML body at all the same as SyncKey '0' (initial sync).", async () => {
             await createMailbox(owner.uid);

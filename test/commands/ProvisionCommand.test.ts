@@ -129,14 +129,17 @@ describe("ProvisionCommand Tests", () => {
     it("Rejects phase 2 acknowledgement when the presented key differs from the stored one (timing-safe compare), without provisioning.", async () => {
         const command = new ProvisionCommand();
         const update = vi.fn().mockResolvedValue(undefined);
-        for (const presented of ["abc124", "different-length-entirely", ""]) {
+        // Both a same-length and a different-length mismatch: `timingSafeEqualStrings()` takes different code
+        // paths for each (a length check up front, then `crypto.timingSafeEqual` only when lengths match), so
+        // both need their own case rather than assuming one implies the other.
+        for (const presented of ["abc124", "different-length-entirely"]) {
             const ctx = makeContext({
                 deviceSyncState: { uid: "dss-1", version: 1, policyKey: "abc123", provisioned: false } as any,
                 deviceSyncStateRepo: { update } as any,
                 request: element(WbxmlCodePage.Provision, "Provision", [
                     element(WbxmlCodePage.Provision, "Policies", [
                         element(WbxmlCodePage.Provision, "Policy", [
-                            textElement(WbxmlCodePage.Provision, "PolicyKey", presented || "x"),
+                            textElement(WbxmlCodePage.Provision, "PolicyKey", presented),
                             textElement(WbxmlCodePage.Provision, "Status", "1"),
                         ]),
                     ]),
@@ -149,6 +152,33 @@ describe("ProvisionCommand Tests", () => {
             expect(ctx.deviceSyncState.provisioned).toBe(false);
         }
         expect(update).not.toHaveBeenCalled();
+    });
+
+    it("Treats a Policy with an empty-text PolicyKey as absent, issuing a fresh policy rather than comparing an empty string.", async () => {
+        // `childText()` reads an empty `<PolicyKey/>` the same as a missing one, so `handle()`'s own
+        // `!clientPolicyKey` check routes this to `issuePolicy()` (Status 1, a freshly minted key) - it never
+        // reaches `acknowledgePolicy()`'s timing-safe comparison at all, unlike a genuinely wrong (but
+        // non-empty) presented key, which does and is rejected with Status 2 (see the test above).
+        const command = new ProvisionCommand();
+        const ctx = makeContext({
+            deviceSyncState: { uid: "dss-1", version: 1, policyKey: "abc123", provisioned: false } as any,
+            request: element(WbxmlCodePage.Provision, "Provision", [
+                element(WbxmlCodePage.Provision, "Policies", [
+                    element(WbxmlCodePage.Provision, "Policy", [
+                        textElement(WbxmlCodePage.Provision, "PolicyKey", ""),
+                        textElement(WbxmlCodePage.Provision, "Status", "1"),
+                    ]),
+                ]),
+            ]),
+        });
+
+        const response = await command.handle(ctx);
+
+        expect(childText(response!, "Status")).toBe("1");
+        const policy = findChild(findChild(response!, "Policies")!, "Policy")!;
+        expect(childText(policy, "PolicyKey")).toBeTruthy();
+        expect(childText(policy, "PolicyKey")).not.toBe("abc123");
+        expect(ctx.deviceSyncState.provisioned).toBe(false);
     });
 
     it("Rejects phase 2 acknowledgement when no policy was ever issued (deviceSyncState.policyKey undefined).", async () => {

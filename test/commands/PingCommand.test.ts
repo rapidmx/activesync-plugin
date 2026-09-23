@@ -15,6 +15,7 @@ import { PingCommand } from "../../src/commands/PingCommand.js";
 import { element, textElement, findChild, childText } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 type PubSubListener = (message: string, channel: string) => void;
 
@@ -199,7 +200,7 @@ function makeRes(): { onFinish: (handler: () => void) => void; finish: () => voi
     };
 }
 
-function makeContext(request: any, overrides: Partial<Record<"deviceId" | "mailboxUid" | "res", any>> = {}): EasCommandContext {
+function makeContext(request: any, overrides: Partial<Record<"deviceId" | "mailboxUid" | "res" | "user", any>> = {}): EasCommandContext {
     return {
         user: { uid: "user-1", roles: [], scopes: [] },
         mailboxUid: "mbx-1",
@@ -320,6 +321,21 @@ describe("PingCommand Tests", () => {
         const response = await responsePromise;
         expect(childText(response!, "Status")).toBe("2");
         expect(findChild(response!, "Folders")!.children.map((f) => f.text)).toEqual(["folder-59"]);
+    });
+
+    it("Trusted-role bypass regression: an admin-role stranger with only READ (a real delegate grant) on one folder only watches that folder, not both via the role.", async () => {
+        const command = await createCommand(REDIS_CONFIG);
+        (command as any).aclUtils = fakeMailAclUtils({ "folder-granted": { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+
+        const res = makeRes();
+        const responsePromise = command.handle(makeContext(pingRequest(1, ["folder-granted", "folder-denied"]), { res, user: TRUSTED_STRANGER_USER }));
+        await tick(20);
+
+        expect(fakeRedisServer.listenerCount("folder-granted")).toBe(1);
+        expect(fakeRedisServer.listenerCount("folder-denied")).toBe(0);
+
+        res.finish();
+        await responsePromise;
     });
 
     it("Waits the full heartbeat before answering Status 1 when no datastores:events config is present.", async () => {

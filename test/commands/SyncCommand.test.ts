@@ -20,6 +20,7 @@ import { EasCollectionLease } from "../../src/EasCollectionLease.js";
 import { INLINE_HELD_LIMIT } from "../../src/EasCollectionStore.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
 import type { EasCollectionSyncAdapter } from "../../src/adapters/EasCollectionSyncAdapter.js";
+import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 const FOLDER_UID = "folder-1";
 const OLD_WATERMARK = new Date("2026-01-01T00:00:00.000Z");
@@ -616,6 +617,60 @@ describe("SyncCommand Tests (isolated)", () => {
             const request = syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Delete", [textElement(WbxmlCodePage.AirSync, "ServerId", "item-1")])]);
 
             expect(responseStatus(await command.handle(buildContext(request).ctx), "Delete")).toBe("6");
+            expect(repo.delete).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("Trusted-role (admin) bypass regression - a trusted role must never substitute for a real ACL grant", () => {
+        it("READ: denies the whole collection to a trusted-role stranger with no grant at all, same as an ordinary stranger.", async () => {
+            const aclUtils = fakeMailAclUtils({});
+            const { command } = await buildCommand("Fake", fakeAdapter(), fakeRepo(), { aclUtils });
+            const { ctx } = buildContext(syncRequest("Fake", []));
+            (ctx as any).user = TRUSTED_STRANGER_USER;
+
+            const response = await command.handle(ctx);
+
+            expect(childText(collection(response!), "Status")).toBe("4");
+        });
+
+        it("Add: a trusted-role caller with only READ on the folder (a real delegate grant) still gets Status 6 on CREATE, not let through by the role.", async () => {
+            const repo = fakeRepo();
+            const aclUtils = fakeMailAclUtils({ [FOLDER_UID]: { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+            const { command } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({ title: "New Item" }) }), repo, { aclUtils });
+            const request = syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Add", [element(WbxmlCodePage.AirSync, "ApplicationData", [])])]);
+            const { ctx } = buildContext(request);
+            (ctx as any).user = TRUSTED_STRANGER_USER;
+
+            expect(responseStatus(await command.handle(ctx), "Add")).toBe("6");
+            expect(repo.create).not.toHaveBeenCalled();
+        });
+
+        it("Change: a trusted-role caller with only READ on the folder still gets Status 6 on UPDATE, not let through by the role.", async () => {
+            const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue({ uid: "item-1", version: 1, folderUid: FOLDER_UID }) });
+            const aclUtils = fakeMailAclUtils({ [FOLDER_UID]: { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+            const { command } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({ title: "Updated" }) }), repo, { aclUtils });
+            const request = syncRequest("Fake", [
+                element(WbxmlCodePage.AirSync, "Change", [
+                    textElement(WbxmlCodePage.AirSync, "ServerId", "item-1"),
+                    element(WbxmlCodePage.AirSync, "ApplicationData", []),
+                ]),
+            ]);
+            const { ctx } = buildContext(request);
+            (ctx as any).user = TRUSTED_STRANGER_USER;
+
+            expect(responseStatus(await command.handle(ctx), "Change")).toBe("6");
+            expect(repo.update).not.toHaveBeenCalled();
+        });
+
+        it("Delete: a trusted-role caller with only READ on the folder still gets Status 6 on DELETE, not let through by the role.", async () => {
+            const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue({ uid: "item-1", version: 1, folderUid: FOLDER_UID }) });
+            const aclUtils = fakeMailAclUtils({ [FOLDER_UID]: { [TRUSTED_STRANGER_USER.uid]: ["read"] } });
+            const { command } = await buildCommand("Fake", fakeAdapter(), repo, { aclUtils });
+            const request = syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Delete", [textElement(WbxmlCodePage.AirSync, "ServerId", "item-1")])]);
+            const { ctx } = buildContext(request);
+            (ctx as any).user = TRUSTED_STRANGER_USER;
+
+            expect(responseStatus(await command.handle(ctx), "Delete")).toBe("6");
             expect(repo.delete).not.toHaveBeenCalled();
         });
     });
