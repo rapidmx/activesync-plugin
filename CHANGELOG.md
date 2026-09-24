@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.5] - 2026-09-24
+
+### Added
+- Added tests proving a trusted-role caller without a real ACL grant is still denied, across all 8 affected commands and one real end-to-end Sync request
+
+### Changed
+- Cap WBXML STR_I inline-string decoding by a configurable total-byte limit, independent of the request-body-size check
+- Compare a presented PolicyKey against the stored one with crypto.timingSafeEqual instead of plain inequality, in BaseEasRoute and ProvisionCommand
+- Re-fetch and return the winning DeviceSyncState row when two concurrent first-pairing creates race the unique (mailboxUid, deviceId) index, instead of letting the loser's error propagate
+- Upgrade the restapi dependency to 0.19.0 and tighten its peer range to a bounded floor, matching sibling plugin convention
+- Route every mailbox-scoped ACL check through restapi's hasMailAccess/stripTrustedRoles instead of aclUtils.hasPermission directly, so the default admin trusted role no longer bypasses per-mailbox ACL grants
+- Delete src/RestapiCompat.ts and replace its inline copies with restapi's own boundIndexedValue/asEntity exports now that the dependency is bumped
+- Replace MimeHeaderUtils.ts's inline copies of restapi's extractOriginatorHeaders/hasAddressLikeDisplayName/checkOriginatorHeaders/isPlainAddress/safeDisplayName with re-exports, keeping only the two private helpers restapi doesn't export
+- Updated rapidrest and rapidmx deps
+
+### Fixed
+- Fixed a SyncCommand test's stale expectation and the SearchProvider/DnsResolver test doubles to match restapi's current API surface
+- Fixed ProvisionCommand.test.ts's wrong-key loop to stop silently skipping its intended empty-string case, and add a dedicated test for the empty-PolicyKey code path it actually takes
+
 ## [1.0.0-beta.4] - 2026-09-15
 
 ### Changed
@@ -241,7 +260,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.4...HEAD
+[Unreleased]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.5...HEAD
+[1.0.0-beta.5]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.4...v1.0.0-beta.5
 [1.0.0-beta.4]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.3...v1.0.0-beta.4
 [1.0.0-beta.3]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.2...v1.0.0-beta.3
 [1.0.0-beta.2]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.1...v1.0.0-beta.2
