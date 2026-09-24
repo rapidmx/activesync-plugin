@@ -728,9 +728,9 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/activesync-plugin@workspace:."
   dependencies:
-    "@rapidmx/restapi": "npm:^0.19.0"
-    "@rapidrest/core": "npm:^5.2.2"
-    "@rapidrest/service-core": "npm:^2.1.0"
+    "@rapidmx/restapi": "npm:^0.20.1"
+    "@rapidrest/core": "npm:^6.0.0"
+    "@rapidrest/service-core": "npm:^2.3.0"
     "@swc/core": "npm:^1.16.2"
     "@types/mailparser": "npm:^3.4.6"
     "@types/nconf": "npm:^0.10.7"
@@ -770,9 +770,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@rapidmx/restapi@npm:^0.19.0":
-  version: 0.19.0
-  resolution: "@rapidmx/restapi@npm:0.19.0"
+"@rapidmx/restapi@npm:^0.20.1":
+  version: 0.20.1
+  resolution: "@rapidmx/restapi@npm:0.20.1"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
@@ -789,7 +789,7 @@ __metadata:
     "@aws-sdk/client-sesv2": 3.x
     "@opensearch-project/opensearch": ">=3.0.0"
     "@rapidrest/core": 5.x
-    "@rapidrest/service-core": ^2.1.0
+    "@rapidrest/service-core": ^2.2.0
     mammoth: ">=1.8.0"
     pdf-parse: ">=1.1.1"
   peerDependenciesMeta:
@@ -805,13 +805,13 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/205c79db6e5b7a5c87f9b6bf8a42a49864c5c9dabaf544fd042603d1054580a8b0ab5be89a25a4cb9bcfd9416270e098ef606133b6518e481cd2794642c040fe
+  checksum: 10c0/2a31d172d49a63a47aa96cc3f5d82adc122cc42ff308061f38c88d8d98c8a252dd25689fe95e57d03ca6e45c0ad79b0a458ac9b336f65acffa9339aa57186a6c
   languageName: node
   linkType: hard
 
-"@rapidrest/core@npm:^5.2.2":
-  version: 5.2.2
-  resolution: "@rapidrest/core@npm:5.2.2"
+"@rapidrest/core@npm:^6.0.0":
+  version: 6.0.0
+  resolution: "@rapidrest/core@npm:6.0.0"
   dependencies:
     form-data: "npm:^4.0.6"
     handlebars: "npm:^4.7.9"
@@ -828,13 +828,13 @@ __metadata:
     reflect-metadata: 0.2.x
     winston: 3.x
     winston-transport: 4.x
-  checksum: 10c0/474853632650bfa9cd74d35f48f68306570cfcb4e07ad79e4cd7b9948135046d3fc1160843a80560e60b449225cf0f0196ab2f36af578435aefe305b78a07756
+  checksum: 10c0/a3751eec5b646264e4bb619e1a365b4fc3350949b009ae25702fa9896e3f24c2257cbe4bf7e6cea59a7b884d48472cf133c59e91b1044212cdb49ede454e9f9c
   languageName: node
   linkType: hard
 
-"@rapidrest/service-core@npm:^2.1.0":
-  version: 2.1.0
-  resolution: "@rapidrest/service-core@npm:2.1.0"
+"@rapidrest/service-core@npm:^2.3.0":
+  version: 2.3.0
+  resolution: "@rapidrest/service-core@npm:2.3.0"
   dependencies:
     axios: "npm:^1.20.0"
     dayjs: "npm:^1.11.23"
@@ -864,7 +864,7 @@ __metadata:
       optional: true
     uWebSockets.js:
       optional: true
-  checksum: 10c0/4b2a7615d41ff51ca67c17c9506b851a472ce6a51d4d6d04cd7b9c76a7aca38656082247049fd682307efc7bb533ded68be96ce6d9ad125af62b51ad8515d3fa
+  checksum: 10c0/08bbefc6e9cf75aae18aa7d5f7dd936c18c6845c341f34b6d77f90c145606ecc84b483e35805bf5aac45e3f644806df4c5d424ba70f26ef014f4f02b94196e18
   languageName: node
   linkType: hard
 
