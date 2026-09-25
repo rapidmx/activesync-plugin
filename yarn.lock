@@ -728,7 +728,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/activesync-plugin@workspace:."
   dependencies:
-    "@rapidmx/restapi": "npm:^0.20.1"
+    "@rapidmx/restapi": "npm:^0.21.1"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/service-core": "npm:^2.3.0"
     "@swc/core": "npm:^1.16.2"
@@ -770,9 +770,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@rapidmx/restapi@npm:^0.20.1":
-  version: 0.20.1
-  resolution: "@rapidmx/restapi@npm:0.20.1"
+"@rapidmx/restapi@npm:^0.21.1":
+  version: 0.21.1
+  resolution: "@rapidmx/restapi@npm:0.21.1"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
@@ -805,7 +805,7 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/2a31d172d49a63a47aa96cc3f5d82adc122cc42ff308061f38c88d8d98c8a252dd25689fe95e57d03ca6e45c0ad79b0a458ac9b336f65acffa9339aa57186a6c
+  checksum: 10c0/9e19bbe18f0c29662230f3d8a74377d52baf51403fafde627fd62422a215e9c692e70b926588a46abe6d07780aa28c9eff6cc2711c774bcfa829c16855d7653b
   languageName: node
   linkType: hard
 
