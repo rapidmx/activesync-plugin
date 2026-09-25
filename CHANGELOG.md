@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.7] - 2026-09-25
+
+### Changed
+- Document that a downstream package's release bump level follows its upstream dependency's, minor for minor, patch for patch and major for major, in NOTES
+- Upgraded restapi dep
+
+### Fixed
+- Fixed repository URL
+
 ## [1.0.0-beta.6] - 2026-09-25
 
 ### Changed
@@ -266,7 +275,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.6...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync/compare/v1.0.0-beta.7...HEAD
+[1.0.0-beta.7]: https://github.com/rapidmx/activesync/compare/v1.0.0-beta.6...v1.0.0-beta.7
 [1.0.0-beta.6]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.5...v1.0.0-beta.6
 [1.0.0-beta.5]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.4...v1.0.0-beta.5
 [1.0.0-beta.4]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.3...v1.0.0-beta.4
