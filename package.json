@@ -2,7 +2,7 @@
     "name": "@rapidmx/activesync-plugin",
     "version": "1.0.0-beta.6",
     "description": "RapixMX plugin that provides Exchange ActiveSync (EAS) protocol support.",
-    "repository": "https://github.com/RapidMX/activesync.git",
+    "repository": "https://github.com/rapidmx/activesync.git",
     "author": "RapidREST <rapidrests@gmail.com>",
     "license": "MPL-2.0",
     "contributors": [
@@ -31,7 +31,7 @@
         "nodemailer": "^10.0.1"
     },
     "devDependencies": {
-        "@rapidmx/restapi": "^0.21.1",
+        "@rapidmx/restapi": "^0.22.1",
         "@rapidrest/core": "^6.0.0",
         "@rapidrest/service-core": "^2.3.0",
         "@swc/core": "^1.16.2",
