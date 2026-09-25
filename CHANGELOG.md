@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.8] - 2026-09-25
+
+### Fixed
+- Fixed repository URL (again)
+
 ## [1.0.0-beta.7] - 2026-09-25
 
 ### Changed
@@ -275,7 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync/compare/v1.0.0-beta.7...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.8...HEAD
+[1.0.0-beta.8]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.7...v1.0.0-beta.8
 [1.0.0-beta.7]: https://github.com/rapidmx/activesync/compare/v1.0.0-beta.6...v1.0.0-beta.7
 [1.0.0-beta.6]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.5...v1.0.0-beta.6
 [1.0.0-beta.5]: https://github.com/RapidMX/activesync/compare/v1.0.0-beta.4...v1.0.0-beta.5
