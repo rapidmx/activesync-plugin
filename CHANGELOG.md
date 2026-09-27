@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.11] - 2026-09-27
+
+### Added
+- Added an optional rawBody flag to EasCommandHandler for a command to opt into this dispatch, and keep both the original WBXML-shape tests and a parallel raw-body set so both paths stay covered
+
+### Changed
+- Accept the raw-MIME request body [MS-ASCMD] actually sends for SendMail/SmartForward/SmartReply from protocol 14.0 on, with SaveInSentItems/ItemId as query parameters, so a real client's send no longer gets stuck retrying in Outbox forever - only the older WBXML-wrapped body was ever accepted before
+- Dispatch between the legacy WBXML-wrapped body and the modern raw-MIME body by the client's own Content-Type header rather than assuming, so a client that still sends the legacy shape despite negotiating a newer version keeps working exactly as before
+- Document the fix in the release notes, changelog, and NOTES, including how it was diagnosed against the live server before any code was written
+
+### Removed
+- Removed the CHANGELOG.md entries this session mistakenly hand-wrote instead of leaving the file to yarn release, which builds it from commit messages alone and duplicates or strands anything typed into it directly
+
 ## [1.0.0-beta.10] - 2026-09-26
 
 ### Changed
@@ -291,7 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.10...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.11...HEAD
+[1.0.0-beta.11]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.10...v1.0.0-beta.11
 [1.0.0-beta.10]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.9...v1.0.0-beta.10
 [1.0.0-beta.9]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.8...v1.0.0-beta.9
 [1.0.0-beta.8]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.7...v1.0.0-beta.8
