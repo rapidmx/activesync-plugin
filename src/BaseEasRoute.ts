@@ -86,9 +86,11 @@ export function isValidDeviceId(deviceId: string | undefined): deviceId is strin
  * a client-supplied one — `resolveCallerMailboxUid`), find-or-create that (mailbox, device) pair's `DeviceSyncState`,
  * refuse a `blocked` device (one that acknowledged a remote wipe) with 403 for anything but `Provision` (which
  * answers Status 129 itself), decode the WBXML request body (if any; malformed or over the decoder's element limits
- * -> 400), enforce the provisioning gate (provisioned *and* presenting the stored policy key, else 449 - only
- * `Provision` and a `Settings` request limited to `UserInformation`/`DeviceInformation` are exempt), dispatch to the matching registered
- * `EasCommandHandler`, record `lastSyncAt` (best-effort), and encode the handler's response back to WBXML.
+ * -> 400) - skipped for a handler whose `rawBody` is `true` (`SendMail`/`SmartForward`/`SmartReply`: raw MIME, not
+ * WBXML, from protocol 14.0 onward), which reads `req.rawBody` itself instead - enforce the provisioning gate
+ * (provisioned *and* presenting the stored policy key, else 449 - only `Provision` and a `Settings` request limited
+ * to `UserInformation`/`DeviceInformation` are exempt), dispatch to the matching registered `EasCommandHandler`,
+ * record `lastSyncAt` (best-effort), and encode the handler's response back to WBXML.
  *
  * **Command handlers** are supplied via `commandHandlerClasses` (empty by default — this class alone is just
  * the transport skeleton; concrete command support, e.g. `ProvisionCommand`/`FolderSyncCommand`, is added
@@ -231,7 +233,15 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             return;
         }
         if (cmd !== "Settings") {
-            request = this.decodeRequest(req);
+            // SendMail/SmartForward/SmartReply's body is raw MIME, not WBXML, from protocol 14.0 onward (the only
+            // versions this library advertises) - decoding it as WBXML would fail or misparse it. But a client is
+            // free to still send the pre-14.0 WBXML-wrapped body regardless of the version it negotiated, so
+            // rather than assume, this only skips decoding when the client's own `Content-Type` doesn't say
+            // WBXML - the real signal every EAS server (including Exchange) actually dispatches on. Those
+            // handlers read `ctx.req.rawBody` themselves when `ctx.request` ends up undefined (see
+            // `EasCommandHandler.rawBody`'s doc comment); `ctx.request` carries the decoded WBXML as normal when
+            // the client did send it that way.
+            request = handler.rawBody ? this.decodeRawBodyRequest(req) : this.decodeRequest(req);
         }
 
         const response: WbxmlElement | undefined = await handler.handle({
@@ -278,6 +288,17 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             }
             throw err;
         }
+    }
+
+    /** For a `rawBody` handler (`SendMail`/`SmartForward`/`SmartReply`): WBXML-decodes the body only when the
+     * client's own `Content-Type` says so (`application/vnd.ms-sync.wbxml`, the pre-14.0 wire format some client
+     * might still send despite negotiating a newer protocol version - still decoded exactly as before, including
+     * a 400 on malformed WBXML). Any other Content-Type (`message/rfc822`, [MS-ASCMD]'s actual 14.0+ format for
+     * these three commands, or none at all) leaves the result `undefined` so the handler reads the raw MIME
+     * bytes itself from `req.rawBody`, per `EasCommandHandler.rawBody`'s doc comment. */
+    private decodeRawBodyRequest(req: HttpRequest): WbxmlElement | undefined {
+        const contentType = firstQueryValue(req.headers["content-type"])?.toLowerCase() ?? "";
+        return contentType.includes("wbxml") ? this.decodeRequest(req) : undefined;
     }
 
     /** `Provision`, and a `Settings` request whose every element is one `SETTINGS_WITHOUT_PROVISIONING` allows. */

@@ -40,7 +40,10 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
         (command as any).mailTransport = {};
         (command as any).scanPipeline = {};
 
-        await expect(command.handle({ request: undefined })).rejects.toThrow(/invalid/i);
+        // `ctx.request` undefined selects the modern raw-body shape (see this class's own doc comment), which
+        // reads `ctx.req.rawBody`/`ctx.query` instead - both must be present (as `BaseEasRoute.dispatch()` always
+        // provides them for a real request) for this guard, not the one above, to be the one that fires.
+        await expect(command.handle({ request: undefined, req: {}, query: {} } as any)).rejects.toThrow(/mime body/i);
     });
 
     it("handle() throws NOT_FOUND when the caller's own mailbox has vanished, before relaying anything.", async () => {
@@ -163,6 +166,122 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
 
         await expect((command as any).handle({ mailboxUid: "mbx", user: TRUSTED_STRANGER_USER, request })).rejects.toMatchObject({ status: 403 });
         expect(send).not.toHaveBeenCalled();
+    });
+
+    // The tests above all exercise the legacy, pre-14.0 WBXML-wrapped shape (`ctx.request` defined - MIME/
+    // SaveInSentItems/Source all travel as WBXML elements), which `handle()` still supports for a client that
+    // sends it despite negotiating a newer protocol version (see `ComposeMailCommand`'s own doc comment and
+    // `BaseEasRoute.decodeRawBodyRequest()`). The tests below cover the modern, spec-correct shape used from
+    // protocol 14.0 on: `ctx.request` is `undefined`, the MIME message is `ctx.req.rawBody` itself, and
+    // `SaveInSentItems`/`ItemId` are read from `ctx.query` instead of WBXML elements.
+    describe("modern raw-body shape (ctx.request undefined; MIME/SaveInSentItems/ItemId via req.rawBody/query)", () => {
+        it("handle() throws INVALID_REQUEST when the raw body is absent.", async () => {
+            const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+            Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo: {}, blobStore: {}, mailTransport: {}, scanPipeline: {} });
+
+            await expect(command.handle({ req: {}, query: {} } as any)).rejects.toThrow(/mime body/i);
+        });
+
+        it("handle() throws NOT_FOUND when the caller's own mailbox has vanished, before relaying anything.", async () => {
+            const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+            const send = vi.fn();
+            Object.assign(command as any, {
+                folderRepo: {},
+                messageRepo: {},
+                mailboxRepo: { findOne: vi.fn().mockResolvedValue(undefined) },
+                blobStore: {},
+                mailTransport: { send },
+                scanPipeline: {},
+            });
+            const mime = Buffer.from("From: me@example.com\r\nTo: you@example.com\r\nSubject: Hi\r\n\r\nBody");
+
+            await expect(
+                (command as any).handle({ mailboxUid: "gone", req: { rawBody: mime } as any, query: {} }),
+            ).rejects.toThrow(/no resource could be found/i);
+            expect(send).not.toHaveBeenCalled();
+        });
+
+        it("handle() refuses a message with more than one From or Sender header with 403, before relaying anything.", async () => {
+            const send = vi.fn();
+            const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com", aliasAddresses: [] }) };
+            for (const headers of [
+                ["From: me@example.com", "from : ceo@example.com"],
+                ["From: me@example.com", "Sender: me@example.com", "SENDER:ceo@example.com"],
+            ]) {
+                const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+                Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo, blobStore: {}, mailTransport: { send }, scanPipeline: {} });
+                const mime = Buffer.from([...headers, "To: you@example.com", "Subject: Hi", "", "Body"].join("\r\n"));
+
+                await expect(
+                    (command as any).handle({ mailboxUid: "mbx", req: { rawBody: mime } as any, query: {} }),
+                ).rejects.toMatchObject({ status: 403 });
+            }
+            expect(send).not.toHaveBeenCalled();
+        });
+
+        it("handle() answers Status 119 for a message with no recipient address and HTTP 400 for no From at all, relaying nothing.", async () => {
+            const send = vi.fn();
+            const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com", aliasAddresses: [] }) };
+            const build = (headers: string[]) => {
+                const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+                Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo, blobStore: {}, mailTransport: { send }, scanPipeline: {} });
+                const mime = Buffer.from([...headers, "Subject: Hi", "", "Body"].join("\r\n"));
+                return { command, req: { rawBody: mime } as any };
+            };
+
+            for (const headers of [["From: me@example.com"], ["From: me@example.com", "To: undisclosed-recipients:;", "Cc: "]]) {
+                const { command, req } = build(headers);
+                const response = await (command as any).handle({ mailboxUid: "mbx", req, query: {} });
+                expect(response.tag).toBe("SendMail");
+                expect(childText(response, "Status")).toBe("119");
+            }
+
+            const { command, req } = build(["To: you@example.com"]);
+            await expect((command as any).handle({ mailboxUid: "mbx", req, query: {} })).rejects.toMatchObject({ status: 400 });
+            expect(send).not.toHaveBeenCalled();
+        });
+
+        it("handle() falls back to just the primary address when the mailbox has no aliasAddresses array at all.", async () => {
+            const send = vi.fn();
+            // No `aliasAddresses` key at all (not even `undefined` explicitly) - `[mailbox.primarySmtpAddress,
+            // ...(mailbox.aliasAddresses ?? [])]` must not throw spreading a missing/undefined array.
+            const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com" }) };
+            const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+            Object.assign(command as any, { folderRepo: {}, messageRepo: {}, mailboxRepo, blobStore: {}, mailTransport: { send }, scanPipeline: {} });
+            const mime = Buffer.from(["From: me@example.com", "Subject: Hi", "", "Body"].join("\r\n"));
+
+            const response = await (command as any).handle({ mailboxUid: "mbx", req: { rawBody: mime } as any, query: {} });
+
+            expect(childText(response, "Status")).toBe("119");
+            expect(send).not.toHaveBeenCalled();
+        });
+
+        it("handle() reads ItemId from the query string, refusing a Source whose message the trusted-role caller has no ACL grant on, with 403 (READ isn't substituted by the role).", async () => {
+            const send = vi.fn();
+            const mailboxRepo = { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com", aliasAddresses: [] }) };
+            const messageRepo = { findOne: vi.fn().mockResolvedValue({ uid: "orig-1", folderUid: "inbox", references: [], messageId: "<orig@example.com>" }) };
+            const command = objectFactory.newInstance<SendMailCommandMongo>(SendMailCommandMongo, { initialize: false });
+            Object.assign(command as any, {
+                folderRepo: {},
+                messageRepo,
+                mailboxRepo,
+                blobStore: {},
+                mailTransport: { send },
+                scanPipeline: {},
+                aclUtils: fakeMailAclUtils({}),
+            });
+            const mime = Buffer.from(["From: me@example.com", "To: you@example.com", "Subject: Hi", "", "Body"].join("\r\n"));
+
+            await expect(
+                (command as any).handle({
+                    mailboxUid: "mbx",
+                    user: TRUSTED_STRANGER_USER,
+                    req: { rawBody: mime } as any,
+                    query: { ItemId: "orig-1" },
+                }),
+            ).rejects.toMatchObject({ status: 403 });
+            expect(send).not.toHaveBeenCalled();
+        });
     });
 
     describe("stripHeader", () => {

@@ -56,14 +56,30 @@ function collectAddresses(entry: EmailAddress, out: string[]): void {
     }
 }
 
+/** The first value of a possibly-repeated query parameter, or `undefined` if it wasn't sent at all. */
+function firstQueryValue(value: string | string[] | undefined): string | undefined {
+    return Array.isArray(value) ? value[0] : value;
+}
+
 export { stripHeader };
 
 /**
  * Shared implementation for EAS `SendMail`, `SmartForward`, and `SmartReply` (MS-ASCMD `ComposeMail` namespace)
- * — all three submit a client-composed raw MIME body directly (`<Mime>`, opaque WBXML content) rather than
- * referencing a pre-existing draft `Message`, unlike the webmail REST API's `POST /messages/:id/send` (see
- * `BaseMessageRoute.send()`, which this class's `scanAndRelay()` call shares its scan-then-relay core with via
- * `MailSendUtils.ts`).
+ * — all three submit a client-composed raw MIME message rather than referencing a pre-existing draft `Message`,
+ * unlike the webmail REST API's `POST /messages/:id/send` (see `BaseMessageRoute.send()`, which this class's
+ * `scanAndRelay()` call shares its scan-then-relay core with via `MailSendUtils.ts`).
+ *
+ * **Request body, and why `rawBody` is `true`**: from protocol version 14.0 onward - the only versions this
+ * library ever advertises (`BaseEasRoute`'s `MS_AS_PROTOCOL_VERSIONS`) - [MS-ASCMD] sends these three commands'
+ * request body as raw MIME (`Content-Type: message/rfc822`) directly, not WBXML-encoded at all, with
+ * `SaveInSentItems` and the item being forwarded/replied to (`ItemId`) as URL query-string parameters instead of
+ * WBXML body elements. `rawBody = true` tells `BaseEasRoute.dispatch()` to only WBXML-decode the body when the
+ * client's own `Content-Type` actually says `application/vnd.ms-sync.wbxml` - the older, pre-14.0 wrapper
+ * (`<ComposeMail:Mime>`, with `SaveInSentItems`/`Source` as sibling elements) that a client could in principle
+ * still send despite negotiating a newer version. `handle()` below supports both shapes rather than assume every
+ * real client gets this right: `ctx.request` defined means the legacy WBXML shape (read from its `MIME`/
+ * `SaveInSentItems`/`Source` elements, same as before this file supported the modern shape at all); `ctx.request`
+ * undefined means the modern raw-body shape, read from `ctx.req.rawBody`/`ctx.query` instead.
  *
  * **Sender and envelope checks** (the MIME is entirely device-controlled): the raw bytes pass restapi's own originator
  * rules before anything parses them (`MimeHeaderUtils.checkComposedOriginators`: an inline copy of restapi's
@@ -80,12 +96,14 @@ export { stripHeader };
  * recall and threading match what recipients received.
  *
  * **Pragmatic subset, deliberately not the full MS-ASCMD semantics**:
- * - `SmartForward`/`SmartReply`'s `<Source>` (the message being forwarded/replied to) is used only to thread
+ * - `SmartForward`/`SmartReply`'s `?ItemId=` (the message being forwarded/replied to) is used only to thread
  * the outgoing message (`inReplyTo`/`references`) and to flip the original's `Answered`/`Forwarded` flag - the
  * real spec has the *server* splice the original message's full content into the outgoing MIME; this subset
- * expects the client's own `<Mime>` to already be the complete outgoing message. The flag flip needs `UPDATE` on
- * the original's folder and is best-effort: the message has already been sent, so a denied or conflicting flag
- * update is logged, never turned into a failed request.
+ * expects the client's own MIME to already be the complete outgoing message. `CollectionId` (the folder a real
+ * Exchange server would need alongside `ItemId` to address it) is not read - this library's `Message.uid` is
+ * already unique on its own. The flag flip needs `UPDATE` on the original's folder and is best-effort: the
+ * message has already been sent, so a denied or conflicting flag update is logged, never turned into a failed
+ * request.
  * - `ReplaceMime`/`AccountId`/`InstanceId` are not read - single-account, non-recurring-meeting compose only.
  * - Attachments present in the composed MIME are relayed correctly but are not additionally persisted as
  * `Attachment` records on the saved Sent Items copy (`Message.hasAttachments` is still set).
@@ -97,6 +115,7 @@ export { stripHeader };
  */
 export abstract class ComposeMailCommand implements EasCommandHandler {
     public abstract readonly command: string;
+    public readonly rawBody = true;
 
     protected abstract folderClass: any;
     protected abstract messageClass: any;
@@ -156,27 +175,39 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         if (!this.folderRepo || !this.messageRepo || !this.mailboxRepo || !this.blobStore || !this.mailTransport || !this.scanPipeline) {
             throw new ApiError(ApiErrors.INTERNAL_ERROR, 500, ApiErrorMessages.INTERNAL_ERROR);
         }
-        if (!ctx.request) {
-            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, ApiErrorMessages.INVALID_REQUEST);
-        }
 
-        // Registered as "MIME" (all caps) in WbxmlCodePages' ComposeMail table, per the published MS-ASWBXML
-        // token name - not "Mime".
-        const mimeEl = findChild(ctx.request, "MIME");
-        const raw: Buffer | undefined = mimeEl?.opaque ?? (mimeEl?.text !== undefined ? Buffer.from(mimeEl.text, "utf-8") : undefined);
+        // Two request shapes (see this class's own doc comment): `ctx.request` defined is the legacy, pre-14.0
+        // WBXML-wrapped body (MIME/SaveInSentItems/Source all travel inside it); undefined is the modern (and
+        // only spec-correct, from protocol 14.0 on) raw-body shape, where the MIME message is `ctx.req.rawBody`
+        // itself and `SaveInSentItems`/`ItemId` are query-string parameters.
+        let raw: Buffer | undefined;
+        let saveInSentItemsRequested: boolean;
+        let itemId: string | undefined;
+        if (ctx.request) {
+            // Registered as "MIME" (all caps) in WbxmlCodePages' ComposeMail table, per the published MS-ASWBXML
+            // token name - not "Mime".
+            const mimeEl = findChild(ctx.request, "MIME");
+            raw = mimeEl?.opaque ?? (mimeEl?.text !== undefined ? Buffer.from(mimeEl.text, "utf-8") : undefined);
+            saveInSentItemsRequested = findChild(ctx.request, "SaveInSentItems") !== undefined;
+            const sourceEl = findChild(ctx.request, "Source");
+            itemId = sourceEl ? childText(sourceEl, "ItemId") : undefined;
+            if (sourceEl && !itemId) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Source is missing its required ItemId.");
+            }
+        } else {
+            raw = ctx.req.rawBody;
+            saveInSentItemsRequested = firstQueryValue(ctx.query["SaveInSentItems"]) !== undefined;
+            itemId = firstQueryValue(ctx.query["ItemId"]);
+        }
         if (!raw || raw.length === 0) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A SendMail/SmartForward/SmartReply request must include a MIME body.");
         }
 
-        // A `SmartForward`/`SmartReply` request identifies the message being acted on via `<Source><ItemId>` -
-        // the same `Message.uid` this library already exposes as `ServerId` in Sync/FolderSync responses.
+        // A `SmartForward`/`SmartReply` request identifies the message being acted on via `ItemId` - the same
+        // `Message.uid` this library already exposes as `ServerId` in Sync/FolderSync responses. Plain `SendMail`
+        // never sends one.
         let original: (Message & { uid: string; version: number }) | undefined;
-        const sourceEl = findChild(ctx.request, "Source");
-        if (sourceEl) {
-            const itemId = childText(sourceEl, "ItemId");
-            if (!itemId) {
-                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Source is missing its required ItemId.");
-            }
+        if (itemId) {
             const found = await this.messageRepo.findOne(itemId, { ignoreACL: true });
             if (!found) {
                 throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
@@ -236,7 +267,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         const stripped: Buffer = stripHeader(raw, "bcc");
         const relayed = await scanAndRelay(stripped, envelopeFrom, envelopeTo, this.scanPipeline, this.mailTransport, this.blobStore);
 
-        if (findChild(ctx.request, "SaveInSentItems")) {
+        if (saveInSentItemsRequested) {
             const bodyBlobKey = `bodies/${crypto.randomUUID()}`;
             // The Sent Items copy keeps its Bcc header, but must carry the `Message-ID` the message was actually relayed
             // with: `scanAndRelay()` injects one when the device's MIME had none, and recall/threading match on it.

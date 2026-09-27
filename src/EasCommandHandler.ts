@@ -62,6 +62,14 @@ export interface EasCommandContext {
 export interface EasCommandHandler {
     /** The exact `?Cmd=` value this handler answers to (e.g. `"FolderSync"`). */
     readonly command: string;
+    /** `true` for the handful of commands (`SendMail`, `SmartForward`, `SmartReply`) whose request body is raw
+     * MIME (`Content-Type: message/rfc822`), not WBXML, from protocol version 14.0 onward - the only versions
+     * this library ever advertises (see `BaseEasRoute`'s `MS_AS_PROTOCOL_VERSIONS`). `BaseEasRoute.dispatch()`
+     * only WBXML-decodes such a request when the client's own `Content-Type` says so (a client may still send
+     * the pre-14.0 WBXML-wrapped body despite negotiating a newer version) - otherwise `EasCommandContext.request`
+     * is left `undefined` and the handler reads the bytes itself from `ctx.req.rawBody`. Omitted (falsy) for
+     * every other command, which is always WBXML regardless of Content-Type. */
+    readonly rawBody?: boolean;
     /** Processes the command and returns the WBXML element tree to send back as the response body, or
      * `undefined` for a command whose successful response is legitimately empty. */
     handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined>;

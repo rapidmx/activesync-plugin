@@ -100,6 +100,19 @@ describe("BaseEasRoute Tests (guard clauses only)", () => {
         return { route, handle, logger };
     }
 
+    it("dispatch() leaves a rawBody handler's ctx.request undefined (raw MIME, not WBXML) whenever Content-Type doesn't say wbxml, including when no Content-Type header is sent at all.", async () => {
+        const { route, handle } = provisionedRoute();
+        (route as any).handlers.set("SendMail", { command: "SendMail", rawBody: true, handle });
+
+        await route.dispatch(
+            { query: { Cmd: "SendMail", DeviceId: "dev1" }, headers: { "x-ms-policykey": "pk-1" }, rawBody: Buffer.from("From: a@b.com") } as any,
+            makeRes(),
+            { uid: "user-1" } as any,
+        );
+
+        expect(handle).toHaveBeenCalledWith(expect.objectContaining({ request: undefined }));
+    });
+
     it("dispatch() answers 413 for a body beyond mail:eas:max_request_bytes, by declared or actual size, before any lookup.", async () => {
         const { route, handle } = provisionedRoute();
         (route as any).maxRequestBytes = 10;

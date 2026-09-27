@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Accept the raw-MIME request body [MS-ASCMD] actually sends for SendMail/SmartForward/SmartReply from protocol 14.0 on, with SaveInSentItems/ItemId as query parameters, instead of only the older WBXML-wrapped body - fixes every 14.0+ client's send getting stuck retrying in Outbox
+- Dispatch between the legacy WBXML-wrapped body and the modern raw-MIME body by the client's own Content-Type header, so a client that still sends the legacy shape keeps working exactly as before
+- Add an optional rawBody flag to EasCommandHandler for a command to opt into this dispatch
+
 ## [1.0.0-beta.10] - 2026-09-26
 
 ### Changed

@@ -2048,6 +2048,10 @@ describe("Route:EasRouteSQL Tests", () => {
             return Buffer.from(lines.join("\r\n"));
         };
 
+        // A client may still send the pre-14.0 WBXML-wrapped body (MIME/SaveInSentItems/Source as WBXML elements)
+        // despite negotiating a newer protocol version - `BaseEasRoute.decodeRawBodyRequest()` decodes it whenever
+        // the client's own Content-Type says so. This describe block's own tests exercise that legacy shape (see
+        // the nested "raw MIME body" describe below for the modern, protocol-14.0+ shape).
         const composeRequest = function (
             cmd: "SendMail" | "SmartForward" | "SmartReply",
             mime: Buffer,
@@ -2375,6 +2379,181 @@ describe("Route:EasRouteSQL Tests", () => {
             const unchanged = await messageRepo.findOne({ where: { uid: original.uid } });
             expect(unchanged?.flags.answered).toBe(false);
             expect(unchanged?.flags.forwarded).toBe(false);
+        });
+
+        // Below: the modern, spec-correct shape used from protocol 14.0 on (see this file's HTTP round trip, and
+        // ComposeMailCommand's own doc comment) - raw MIME directly as the body (Content-Type: message/rfc822),
+        // with SaveInSentItems/ItemId as URL query-string parameters instead of WBXML elements.
+        // `BaseEasRoute.decodeRawBodyRequest()` only WBXML-decodes the body for these commands when the client's
+        // own Content-Type says so, so a non-WBXML Content-Type here exercises this path instead of the legacy
+        // one above.
+        describe("raw MIME body (Content-Type: message/rfc822, protocol >= 14.0)", () => {
+            const composeQuery = function (opts: { saveInSentItems?: boolean; source?: { itemId: string } } = {}): string {
+                let query = "";
+                if (opts.saveInSentItems) {
+                    query += "&SaveInSentItems";
+                }
+                if (opts.source) {
+                    query += `&ItemId=${encodeURIComponent(opts.source.itemId)}`;
+                }
+                return query;
+            };
+
+            it("SendMail relays the composed message and returns an empty response.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(rawMime());
+
+                expect(result.status).toBeGreaterThanOrEqual(200);
+                expect(result.status).toBeLessThan(300);
+                expect(result.body.length).toBe(0);
+                expect(transport().sent.length).toBe(1);
+                expect(transport().sent[0].envelopeTo).toEqual(["recipient@example.com"]);
+            });
+
+            it("SendMail with SaveInSentItems creates a Message in the mailbox's Sent Items folder.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+
+                const mime = rawMime({ subject: "Saved Copy (raw)", cc: "cc@example.com", bcc: "bcc@example.com" });
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1${composeQuery({ saveInSentItems: true })}`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(mime);
+                expect(result.status).toBeGreaterThanOrEqual(200);
+                expect(result.status).toBeLessThan(300);
+
+                const sentFolder = await folderRepo.findOne({ where: { type: FolderType.SENT_ITEMS } });
+                const saved = await messageRepo.findOne({ where: { folderUid: sentFolder!.uid, subject: "Saved Copy (raw)" } });
+                expect(saved).not.toBeNull();
+                expect(saved?.recipients).toEqual([
+                    { address: "recipient@example.com", type: RecipientType.TO },
+                    { address: "cc@example.com", type: RecipientType.CC },
+                    { address: "bcc@example.com", type: RecipientType.BCC },
+                ]);
+            });
+
+            it("SendMail without SaveInSentItems relays but does not save a copy.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+
+                await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(rawMime({ subject: "Not Saved (raw)" }));
+
+                const anyMessage = await messageRepo.findOne({ where: { subject: "Not Saved (raw)" } });
+                expect(anyMessage).toBeNull();
+            });
+
+            it("Rejects a compose request with no MIME body.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"));
+
+                expect(result.status).toBe(400);
+            });
+
+            it("SmartReply threads the reply to the original (ItemId via query) and marks it Answered.", async () => {
+                const mailbox = await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+                const inbox = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+                const original = await createMessage(mailbox.uid, inbox.uid, { messageId: "<original-raw@example.com>", references: [] });
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SmartReply&DeviceId=dev1${composeQuery({ saveInSentItems: true, source: { itemId: original.uid } })}`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(rawMime({ subject: "Re: Test Compose (raw)" }));
+                expect(result.status).toBeGreaterThanOrEqual(200);
+                expect(result.status).toBeLessThan(300);
+
+                const updatedOriginal = await messageRepo.findOne({ where: { uid: original.uid } });
+                expect(updatedOriginal?.flags.answered).toBe(true);
+
+                const reply = await messageRepo.findOne({ where: { subject: "Re: Test Compose (raw)" } });
+                expect(reply?.inReplyTo).toBe("<original-raw@example.com>");
+            });
+
+            it("SmartForward marks the original message Forwarded (ItemId via query).", async () => {
+                const mailbox = await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+                const inbox = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+                const original = await createMessage(mailbox.uid, inbox.uid, { messageId: "<original2-raw@example.com>" });
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SmartForward&DeviceId=dev1${composeQuery({ source: { itemId: original.uid } })}`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(rawMime({ subject: "Fwd: Test Compose (raw)" }));
+                expect(result.status).toBeGreaterThanOrEqual(200);
+                expect(result.status).toBeLessThan(300);
+
+                const updatedOriginal = await messageRepo.findOne({ where: { uid: original.uid } });
+                expect(updatedOriginal?.flags.forwarded).toBe(true);
+            });
+
+            it("Returns 404 when the query ItemId references a message that doesn't exist.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SmartReply&DeviceId=dev1${composeQuery({ source: { itemId: uuid.v4() } })}`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(rawMime());
+
+                expect(result.status).toBe(404);
+            });
+
+            it("Returns 403 when the query ItemId references a message the caller has no permission on.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+                const otherMailbox = await createMailbox(otherUser.uid);
+                const otherInbox = await createFolderWithAcl(otherMailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+                const otherMessage = await createMessage(otherMailbox.uid, otherInbox.uid);
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SmartReply&DeviceId=dev1${composeQuery({ source: { itemId: otherMessage.uid } })}`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(rawMime());
+
+                expect(result.status).toBe(403);
+            });
+
+            it("Returns 400 when the composed Mime has no resolvable From/To address.", async () => {
+                await createMailbox(owner.uid, ["owner@example.com"]);
+                await provisionDevice("dev1");
+                const noAddressMime = Buffer.from(["Subject: No addresses", "MIME-Version: 1.0", "Content-Type: text/plain", "", "Body only."].join("\r\n"));
+
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "message/rfc822")
+                    .send(noAddressMime);
+
+                expect(result.status).toBe(400);
+            });
         });
     });
 
