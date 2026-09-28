@@ -87,6 +87,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Enable corepack
+        run: corepack enable
+
       - name: Run validation script
         run: |
           set +e
