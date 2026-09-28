@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.14] - 2026-09-28
+
+### Changed
+- Revert beta.13's temporary Provision diagnostic logging now that the captured wire trace has answered the question it was added for
+- Confirm via the trace that this library's Provision handshake completes correctly every time (matching keys, Status 1, provisioned flips true) and the loop is the client itself discarding that success and restarting from scratch, not a server-side gap
+- Document the full trace analysis and conclusion in NOTES, including the recommended next step being client-side rather than further server changes
+
 ## [1.0.0-beta.13] - 2026-09-28
 
 ### Added
@@ -321,7 +328,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.13...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.14...HEAD
+[1.0.0-beta.14]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.13...v1.0.0-beta.14
 [1.0.0-beta.13]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.12...v1.0.0-beta.13
 [1.0.0-beta.12]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.11...v1.0.0-beta.12
 [1.0.0-beta.11]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.10...v1.0.0-beta.11
