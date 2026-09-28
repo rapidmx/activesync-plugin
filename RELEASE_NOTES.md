@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **Temporary diagnostic logging for the `Provision` command**, to capture the real wire bytes of a device's `Provision` handshake while chasing an Android Gmail Provision-loop that beta.12's fuller `EASProvisionDoc` didn't resolve. `BaseEasRoute.dispatch()` now logs (`warn` level, tag `EAS_DEBUG`) the decoded request and raw incoming hex on the way in, and the raw outgoing response hex on the way out, for `Cmd=Provision` only. Not a behavior change - purely observational - and expected to be removed again once the real root cause is confirmed from what this reveals.
+
 ## v1.0.0-beta.12
 
 ### Fixed

@@ -244,6 +244,18 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             request = handler.rawBody ? this.decodeRawBodyRequest(req) : this.decodeRequest(req);
         }
 
+        // TEMPORARY DIAGNOSTIC LOGGING - see NOTES.md's 2026-09-27 "diagnostic release" entry. Remove once the
+        // real Android Gmail Provision-loop root cause is confirmed; not meant to survive past the next release.
+        if (cmd === "Provision") {
+            this.logger?.warn(
+                `EAS_DEBUG Provision IN device=${deviceId} rawBodyHex=${
+                    req.rawBody ? req.rawBody.toString("hex") : "<empty>"
+                } decoded=${JSON.stringify(request)} storedPolicyKey=${deviceSyncState.policyKey} provisioned=${
+                    deviceSyncState.provisioned
+                }`,
+            );
+        }
+
         const response: WbxmlElement | undefined = await handler.handle({
             user,
             mailboxUid,
@@ -272,6 +284,14 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
         }
 
         const buffer: Buffer = new WbxmlEncoder().encode(response);
+        // TEMPORARY DIAGNOSTIC LOGGING - see the matching comment above.
+        if (cmd === "Provision") {
+            this.logger?.warn(
+                `EAS_DEBUG Provision OUT device=${deviceId} responseHex=${buffer.toString(
+                    "hex",
+                )} storedPolicyKeyAfter=${deviceSyncState.policyKey} provisionedAfter=${deviceSyncState.provisioned}`,
+            );
+        }
         res.setHeader("Content-Type", "application/vnd.ms-sync.wbxml")
             .setHeader("Content-Length", buffer.length)
             .status(200)
