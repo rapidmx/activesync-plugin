@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Removed
+
+- **Reverted beta.13's temporary `Provision` diagnostic logging.** It did its job: the captured wire trace showed this library's `Provision` handshake completing correctly every single time (matching keys, `Status: 1`, `provisioned` flipping to `true`) - the device itself (a beta Android build) discards that success and restarts the handshake from scratch instead of ever using it, a client-side issue with nothing left for this library to fix. See `.claude/NOTES.md` for the full trace analysis.
+
 ## v1.0.0-beta.13
 
 ### Added
