@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.13] - 2026-09-28
+
+### Added
+- Added temporary diagnostic logging to Provision, since beta.12's fuller EASProvisionDoc made no difference on the live device and real wire-level evidence is needed instead of another guess
+
+### Changed
+- Log the decoded request tree, raw incoming body hex, and the device's stored policyKey/provisioned state before the command handler runs, then the raw outgoing response hex and the same state after, scoped to Cmd=Provision only and tagged EAS_DEBUG
+- Use the existing warn-level logger rather than a new debug call, since no app-level debug/info logging exists anywhere in this codebase yet
+- Document the plan to remove this again once it reveals the real root cause
+
 ## [1.0.0-beta.12] - 2026-09-28
 
 ### Changed
@@ -311,7 +321,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.12...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.13...HEAD
+[1.0.0-beta.13]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.12...v1.0.0-beta.13
 [1.0.0-beta.12]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.11...v1.0.0-beta.12
 [1.0.0-beta.11]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.10...v1.0.0-beta.11
 [1.0.0-beta.10]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.9...v1.0.0-beta.10
