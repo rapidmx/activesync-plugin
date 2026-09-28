@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.12] - 2026-09-28
+
+### Changed
+- Send the full EASProvisionDoc field set from Provision instead of just the 6 configured fields, since Android's Gmail EAS client appears to silently discard an incomplete policy document rather than acknowledge it, leaving a device stuck endlessly re-requesting Provision without ever completing the handshake
+- Mirror RequireDeviceEncryption onto the legacy DeviceEncryptionEnabled tag for a client that still looks for the older field, without loosening what a deployment actually enforces
+- Document the fix, and how it was diagnosed from the Envoy Gateway's own access log since this app logs nothing per-request, in the release notes and NOTES, noting it is not yet confirmed against the real device
+
 ## [1.0.0-beta.11] - 2026-09-27
 
 ### Added
@@ -304,7 +311,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.11...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.12...HEAD
+[1.0.0-beta.12]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.11...v1.0.0-beta.12
 [1.0.0-beta.11]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.10...v1.0.0-beta.11
 [1.0.0-beta.10]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.9...v1.0.0-beta.10
 [1.0.0-beta.9]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.8...v1.0.0-beta.9
