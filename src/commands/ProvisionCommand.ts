@@ -115,30 +115,69 @@ export class ProvisionCommand implements EasCommandHandler {
                     textElement(WbxmlCodePage.Provision, "Status", "1"),
                     textElement(WbxmlCodePage.Provision, "PolicyKey", policyKey),
                     element(WbxmlCodePage.Provision, "Data", [
-                        element(WbxmlCodePage.Provision, "EASProvisionDoc", [
-                            textElement(WbxmlCodePage.Provision, "DevicePasswordEnabled", this.passwordEnabled ? "1" : "0"),
-                            textElement(WbxmlCodePage.Provision, "MinDevicePasswordLength", String(this.minPasswordLength)),
-                            textElement(
-                                WbxmlCodePage.Provision,
-                                "MaxDevicePasswordFailedAttempts",
-                                String(this.maxFailedAttempts),
-                            ),
-                            textElement(
-                                WbxmlCodePage.Provision,
-                                "AllowSimpleDevicePassword",
-                                this.allowSimplePassword ? "1" : "0",
-                            ),
-                            textElement(
-                                WbxmlCodePage.Provision,
-                                "RequireDeviceEncryption",
-                                this.requireDeviceEncryption ? "1" : "0",
-                            ),
-                            textElement(WbxmlCodePage.Provision, "AttachmentsEnabled", "1"),
-                        ]),
+                        element(WbxmlCodePage.Provision, "EASProvisionDoc", this.easProvisionDocFields()),
                     ]),
                 ]),
             ]),
         ]);
+    }
+
+    /**
+     * The full `EASProvisionDoc` field set, not just the handful this deployment actually makes configurable.
+     * Real Exchange (and every interoperable open-source EAS server, e.g. Z-Push) always sends the complete
+     * schema, even when most values are just permissive defaults - some mobile EAS parsers (Android's Gmail
+     * sync engine has a documented history of this) are defensive-but-brittle about a policy document that
+     * omits fields they expect to always be present, and can silently discard the whole policy rather than
+     * apply the parts it understood. That looks indistinguishable from a network/auth problem: the device just
+     * never acknowledges `Provision` request 2 and keeps re-requesting request 1 forever. Only the five fields
+     * above `@Config`-driven; everything else here is a fixed, maximally-permissive value (unlimited/allowed) so
+     * this only ever *adds* clarity for a strict client, never *tightens* what this deployment actually enforces
+     * (still just password + encryption, gated by `BaseEasRoute`'s own provisioning check).
+     */
+    private easProvisionDocFields(): WbxmlElement[] {
+        const p = WbxmlCodePage.Provision;
+        return [
+            textElement(p, "DevicePasswordEnabled", this.passwordEnabled ? "1" : "0"),
+            textElement(p, "AlphanumericDevicePasswordRequired", "0"),
+            textElement(p, "DeviceEncryptionEnabled", this.requireDeviceEncryption ? "1" : "0"),
+            textElement(p, "PasswordRecoveryEnabled", "0"),
+            textElement(p, "AttachmentsEnabled", "1"),
+            textElement(p, "MinDevicePasswordLength", String(this.minPasswordLength)),
+            textElement(p, "MaxInactivityTimeDeviceLock", "900"),
+            textElement(p, "MaxDevicePasswordFailedAttempts", String(this.maxFailedAttempts)),
+            textElement(p, "MaxAttachmentSize", "0"),
+            textElement(p, "AllowSimpleDevicePassword", this.allowSimplePassword ? "1" : "0"),
+            textElement(p, "DevicePasswordExpiration", "0"),
+            textElement(p, "DevicePasswordHistory", "0"),
+            textElement(p, "AllowStorageCard", "1"),
+            textElement(p, "AllowCamera", "1"),
+            textElement(p, "RequireDeviceEncryption", this.requireDeviceEncryption ? "1" : "0"),
+            textElement(p, "AllowUnsignedApplications", "1"),
+            textElement(p, "AllowUnsignedInstallationPackages", "1"),
+            textElement(p, "MinDevicePasswordComplexCharacters", "0"),
+            textElement(p, "AllowWiFi", "1"),
+            textElement(p, "AllowTextMessaging", "1"),
+            textElement(p, "AllowPOPIMAPEmail", "1"),
+            textElement(p, "AllowBluetooth", "2"),
+            textElement(p, "AllowIrDA", "1"),
+            textElement(p, "RequireManualSyncWhenRoaming", "0"),
+            textElement(p, "AllowDesktopSync", "1"),
+            textElement(p, "MaxCalendarAgeFilter", "0"),
+            textElement(p, "AllowHTMLEmail", "1"),
+            textElement(p, "MaxEmailAgeFilter", "0"),
+            textElement(p, "MaxEmailBodyTruncationSize", "-1"),
+            textElement(p, "MaxEmailHTMLBodyTruncationSize", "-1"),
+            textElement(p, "RequireSignedSMIMEMessages", "0"),
+            textElement(p, "RequireEncryptedSMIMEMessages", "0"),
+            textElement(p, "RequireSignedSMIMEAlgorithm", "0"),
+            textElement(p, "RequireEncryptionSMIMEAlgorithm", "0"),
+            textElement(p, "AllowSMIMEEncryptionAlgorithmNegotiation", "2"),
+            textElement(p, "AllowSMIMESoftCerts", "1"),
+            textElement(p, "AllowBrowser", "1"),
+            textElement(p, "AllowConsumerEmail", "1"),
+            textElement(p, "AllowRemoteDesktop", "1"),
+            textElement(p, "AllowInternetSharing", "1"),
+        ];
     }
 
     /** Request 2: the client acknowledges the policy key it was handed in request 1, self-reporting whether

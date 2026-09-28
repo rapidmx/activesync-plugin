@@ -59,6 +59,34 @@ describe("ProvisionCommand Tests", () => {
         expect(childText(doc, "MaxDevicePasswordFailedAttempts")).toBe("8");
         expect(childText(doc, "AllowSimpleDevicePassword")).toBe("0");
         expect(childText(doc, "RequireDeviceEncryption")).toBe("1");
+        // The rest of the full EASProvisionDoc field set (see easProvisionDocFields()'s own doc comment for why
+        // it's sent in full rather than just these five configurable fields) - spot-check a few, including
+        // DeviceEncryptionEnabled, the legacy pre-14.0 tag mirroring RequireDeviceEncryption for a client that
+        // still looks for it.
+        expect(childText(doc, "DeviceEncryptionEnabled")).toBe("1");
+        expect(childText(doc, "AlphanumericDevicePasswordRequired")).toBe("0");
+        expect(childText(doc, "MaxAttachmentSize")).toBe("0");
+        expect(childText(doc, "AllowCamera")).toBe("1");
+        expect(childText(doc, "MaxEmailBodyTruncationSize")).toBe("-1");
+    });
+
+    it("Reflects non-default password/encryption config values in the policy document, both the configurable fields and their DeviceEncryptionEnabled/RequireDeviceEncryption mirror.", async () => {
+        const command = new ProvisionCommand();
+        (command as any).passwordEnabled = false;
+        (command as any).allowSimplePassword = true;
+        (command as any).requireDeviceEncryption = false;
+        const ctx = makeContext({ request: undefined });
+
+        const response = await command.handle(ctx);
+
+        const doc = findChild(
+            findChild(findChild(findChild(response!, "Policies")!, "Policy")!, "Data")!,
+            "EASProvisionDoc",
+        )!;
+        expect(childText(doc, "DevicePasswordEnabled")).toBe("0");
+        expect(childText(doc, "AllowSimpleDevicePassword")).toBe("1");
+        expect(childText(doc, "RequireDeviceEncryption")).toBe("0");
+        expect(childText(doc, "DeviceEncryptionEnabled")).toBe("0");
     });
 
     it("Sends a RemoteWipe directive instead of a policy document when a wipe is pending, without minting a policy key.", async () => {

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`Provision`'s policy document now sends the full `EASProvisionDoc` field set, not just the five fields this deployment actually makes configurable.** A device stuck endlessly re-requesting `Provision` (never completing the second, acknowledging request) despite a correct, spec-compliant server response was traced to Android's Gmail app: its EAS provisioning parser is defensive-but-brittle about a policy document missing fields it expects to always be present (real Exchange, and interoperable servers like Z-Push, always send the complete schema), and appears to silently discard the whole policy rather than apply the parts it understood - indistinguishable, from the outside, from a network or auth failure. The document now includes every `EASProvisionDoc` field with maximally permissive fixed values for anything not already `@Config`-driven, plus the legacy `DeviceEncryptionEnabled` tag mirroring `RequireDeviceEncryption` for a client that still looks for the older tag. This only adds clarity for a strict client; it never changes what a deployment actually enforces (still just password/encryption, exactly as configured).
+
 ## v1.0.0-beta.11
 
 ### Fixed
