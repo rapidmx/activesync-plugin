@@ -2906,6 +2906,35 @@ describe("Route:EasRouteMongo Tests", () => {
             expect(childText(body, "Data")).toBe("Plain body text.");
         });
 
+        it("Answers 500 when the message's body blob can't be loaded, logging the real cause rather than swallowing it.", async () => {
+            const mailbox = await createMailbox(owner.uid);
+            await provisionDevice("dev1");
+            const folder = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+            // No sanitized HTML, and its bodyBlobKey is never put() into the blob store - the raw-MIME
+            // fallback's blobStore.get() throws, the exact failure this test targets (see ItemOperationsCommand's
+            // own doc comment: a Fetch failure aborts the whole request via an HTTP-level error, not an embedded
+            // Status code - this is what a real device sees as "server error").
+            const message = await createMessage(mailbox.uid, folder.uid, { sanitizedHtmlBlobKey: undefined });
+
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=ItemOperations&DeviceId=dev1`)
+                .set("Authorization", "jwt " + ownerToken)
+                .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(
+                    new WbxmlEncoder().encode(
+                        element(WbxmlCodePage.ItemOperations, "ItemOperations", [
+                            element(WbxmlCodePage.ItemOperations, "Fetch", [
+                                textElement(WbxmlCodePage.ItemOperations, "Store", "Mailbox"),
+                                textElement(WbxmlCodePage.AirSync, "ServerId", message.uid),
+                            ]),
+                        ]),
+                    ),
+                );
+
+            expect(result.status).toBe(500);
+        });
+
         it("Fetches a message's sanitized HTML body when available.", async () => {
             const mailbox = await createMailbox(owner.uid);
             await provisionDevice("dev1");
