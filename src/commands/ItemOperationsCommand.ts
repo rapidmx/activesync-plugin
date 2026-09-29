@@ -251,10 +251,14 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Fetch requires either a ServerId or a FileReference.");
         }
         const message: Message | undefined = await this.messageRepo!.findOne(serverId, { ignoreACL: true });
+        // TEMPORARY DIAGNOSTIC LOGGING - see the matching comment further down this method.
+        this.logger?.warn(`EAS_DEBUG ItemOperations Fetch lookup serverId=${serverId} found=${!!message} folderUid=${message?.folderUid ?? "<n/a>"}`);
         if (!message) {
             throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
         }
-        if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.READ))) {
+        const permitted = await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.READ);
+        this.logger?.warn(`EAS_DEBUG ItemOperations Fetch ACL serverId=${serverId} userUid=${ctx.user?.uid} permitted=${permitted}`);
+        if (!permitted) {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
 
@@ -263,23 +267,41 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         const truncationSizeText = bodyPreferenceEl ? childText(bodyPreferenceEl, "TruncationSize") : undefined;
         const truncationSize = truncationSizeText !== undefined ? Number(truncationSizeText) : undefined;
 
+        // TEMPORARY DIAGNOSTIC LOGGING - investigating a real-device report ("server error" reading any message,
+        // Apple Mail): this method's own doc comment already notes a Fetch failure aborts the whole request via
+        // an HTTP-level error rather than an embedded Status, so whatever throws below is exactly what the
+        // client sees as "server error" - logging it before it propagates, since nothing currently surfaces the
+        // real cause. Not a behavior change - purely observational - expected to be reverted once the root
+        // cause is confirmed.
+        this.logger?.warn(
+            `EAS_DEBUG ItemOperations Fetch IN serverId=${serverId} requestedType=${requestedType ?? "<none>"} truncationSize=${truncationSizeText ?? "<none>"} ` +
+                `bodyBlobKey=${message.bodyBlobKey ?? "<missing>"} sanitizedHtmlBlobKey=${message.sanitizedHtmlBlobKey ?? "<none>"}`,
+        );
+
         // Prefer the already-sanitized HTML body (script/active-content stripped by ScanPipeline at
         // ingestion/send time) over re-deriving anything from the raw MIME - the same preference
         // `Message.sanitizedHtmlBlobKey`'s own doc comment describes for any renderer. `Type 4` (MIME) is an
         // explicit client request for the verbatim raw source instead, honored regardless of that preference.
         let bodyType = "1";
         let bodyText: string;
-        if (requestedType === "4") {
-            bodyType = "4";
-            bodyText = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
-        } else if (message.sanitizedHtmlBlobKey) {
-            bodyType = "2";
-            bodyText = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
-        } else {
-            const raw = await this.blobStore!.get(message.bodyBlobKey);
-            const parsed = await simpleParser(raw);
-            bodyText = parsed.text ?? "";
+        try {
+            if (requestedType === "4") {
+                bodyType = "4";
+                bodyText = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
+            } else if (message.sanitizedHtmlBlobKey) {
+                bodyType = "2";
+                bodyText = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
+            } else {
+                const raw = await this.blobStore!.get(message.bodyBlobKey);
+                const parsed = await simpleParser(raw);
+                bodyText = parsed.text ?? "";
+            }
+        } catch (err: any) {
+            // TEMPORARY DIAGNOSTIC LOGGING - see the matching comment above.
+            this.logger?.warn(`EAS_DEBUG ItemOperations Fetch body load FAILED serverId=${serverId} bodyType=${bodyType} error=${err?.stack ?? err}`);
+            throw err;
         }
+        this.logger?.warn(`EAS_DEBUG ItemOperations Fetch body loaded OK serverId=${serverId} bodyType=${bodyType} bytes=${Buffer.byteLength(bodyText, "utf8")}`);
 
         // Per MS-ASAIRSYNCBASE, EstimatedDataSize reports the body's size BEFORE any truncation was applied
         // (so the client knows how much more content exists beyond what it received) - captured here, before

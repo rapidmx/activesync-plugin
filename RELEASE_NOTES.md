@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **Temporary diagnostic logging** for a real-device report: Apple Mail can add the account, sync mail/calendar/contacts and send, but reading any message answers "server error." `ItemOperationsCommand.fetchMessage()` now logs (`warn` level, tag `EAS_DEBUG`) the incoming `Fetch`'s `ServerId`/`BodyPreference`, whether the message was found and its `bodyBlobKey`/`sanitizedHtmlBlobKey`, the `ACLUtils` permission check's result, and - wrapped around the body-loading block - the real error (with stack) on any throw, before it propagates. Per this command's own doc comment, a `Fetch` failure already aborts the whole request via an HTTP-level error rather than an embedded `Status` code, so whatever throws in that block is exactly what the client sees as "server error" - nothing previously surfaced what that was. Not a behavior change - purely observational - expected to be reverted once the root cause is confirmed.
+
 ## v1.0.0-beta.14
 
 ### Removed
