@@ -69,4 +69,8 @@ jobs:
         run: yarn build
 
       - name: Publish to npm
-        run: npm publish --access public
+        # A prerelease version (1.0.0-beta.N) must be published under an explicit dist-tag: npm refuses it otherwise, and it must not become `latest`.
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [[ "$version" == *-* ]]; then tag=next; else tag=latest; fi
+          npm publish --access public --tag "$tag"
