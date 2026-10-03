@@ -47,19 +47,19 @@ export abstract class EasDeviceStateCleanupJob<D extends DeviceSyncState> extend
     }
 
     @Init
-    public async init(): Promise<void> {
-        this.deviceSyncStateRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.deviceSyncStateClass.name,
-            args: [this.deviceSyncStateClass],
-        });
-        this.collectionStateRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.collectionStateClass.name,
-            args: [this.collectionStateClass],
-        });
-        this.collectionChunkRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.collectionChunkClass.name,
-            args: [this.collectionChunkClass],
-        });
+    protected async init(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.deviceSyncStateRepo && this.deviceSyncStateClass) {
+            this.deviceSyncStateRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.deviceSyncStateClass.name, args: [this.deviceSyncStateClass] });
+        }
+        if (!this.collectionStateRepo && this.collectionStateClass) {
+            this.collectionStateRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.collectionStateClass.name, args: [this.collectionStateClass] });
+        }
+        if (!this.collectionChunkRepo && this.collectionChunkClass) {
+            this.collectionChunkRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.collectionChunkClass.name, args: [this.collectionChunkClass] });
+        }
     }
 
     public async start(): Promise<void> {

@@ -134,17 +134,18 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
     private logger: any;
 
     @Init
-    public async init(): Promise<void> {
-        this.deviceSyncStateRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.deviceSyncStateClass.name,
-            args: [this.deviceSyncStateClass],
-        });
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.deviceSyncStateRepo && this.deviceSyncStateClass) {
+            this.deviceSyncStateRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.deviceSyncStateClass.name, args: [this.deviceSyncStateClass] });
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
         for (const HandlerClass of this.commandHandlerClasses) {
-            const handler: EasCommandHandler = await this._objectFactory!.newInstance(HandlerClass);
+            const handler: EasCommandHandler = await this._objectFactory.newInstance(HandlerClass);
             this.handlers.set(handler.command, handler);
         }
     }

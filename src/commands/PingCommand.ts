@@ -121,19 +121,25 @@ export class PingCommand implements EasCommandHandler {
     private repos = new Map<string, RepoUtils<any>>();
 
     @Init
-    public async init(): Promise<void> {
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.collectionStateRepo && this.collectionStateClass) {
+            this.collectionStateRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.collectionStateClass.name, args: [this.collectionStateClass] });
+        }
         if (!this.collectionStateClass) {
             return;
         }
-        this.collectionStateRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.collectionStateClass.name,
-            args: [this.collectionStateClass],
-        });
         for (const [collectionClass, binding] of Object.entries(this.collectionBindings)) {
-            this.repos.set(
-                collectionClass,
-                await this._objectFactory!.newInstance(RecoverableRepoUtils, { name: binding.entityClass.name, args: [binding.entityClass] }),
-            );
+            if (!this.repos.has(collectionClass)) {
+                // RecoverableRepoUtils: a soft-delete must bump `dateModified`/`version`, or the change stream
+                // enumerated here would never see it.
+                this.repos.set(
+                    collectionClass,
+                    await this._objectFactory.newInstance(RecoverableRepoUtils, { name: binding.entityClass.name, args: [binding.entityClass] }),
+                );
+            }
         }
     }
 

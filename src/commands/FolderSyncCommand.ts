@@ -95,11 +95,13 @@ export abstract class FolderSyncCommand<F extends Folder> implements EasCommandH
     private folderRepo?: RepoUtils<F>;
 
     @Init
-    public async init(): Promise<void> {
-        this.folderRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.folderClass.name,
-            args: [this.folderClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.folderRepo && this.folderClass) {
+            this.folderRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
+        }
     }
 
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {

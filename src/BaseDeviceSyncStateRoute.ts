@@ -6,7 +6,7 @@ import { ApiError, ObjectDecorators, ObjectFactory, UserUtils, type JWTUser } fr
 import { ApiErrorMessages, ApiErrors, HttpRequest, RepoUtils, RouteDecorators } from "@rapidrest/service-core";
 import type { DeviceSyncState } from "./models/DeviceSyncState.js";
 import { persistDeviceSyncState } from "./EasSyncKeyUtils.js";
-const { Config } = ObjectDecorators;
+const { Config, Init } = ObjectDecorators;
 const { Auth, Param, Post, Request, User: AuthUser } = RouteDecorators;
 
 /**
@@ -41,14 +41,17 @@ export abstract class BaseDeviceSyncStateRoute<D extends DeviceSyncState> {
 
     private deviceSyncStateRepo?: RepoUtils<D>;
 
-    private async getDeviceSyncStateRepo(): Promise<RepoUtils<D>> {
-        if (!this.deviceSyncStateRepo) {
-            this.deviceSyncStateRepo = await this._objectFactory!.newInstance(RepoUtils, {
+    @Init
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.deviceSyncStateRepo && this.deviceSyncStateClass) {
+            this.deviceSyncStateRepo = await this._objectFactory.newInstance(RepoUtils, {
                 name: this.deviceSyncStateClass.name,
                 args: [this.deviceSyncStateClass],
             });
         }
-        return this.deviceSyncStateRepo;
     }
 
     /**
@@ -69,7 +72,7 @@ export abstract class BaseDeviceSyncStateRoute<D extends DeviceSyncState> {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
 
-        const repo: RepoUtils<D> = await this.getDeviceSyncStateRepo();
+        const repo: RepoUtils<D> = this.deviceSyncStateRepo!;
         const deviceSyncState: D | undefined = await repo.findOne(uid, { ignoreACL: true });
         if (!deviceSyncState) {
             throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
@@ -97,7 +100,7 @@ export abstract class BaseDeviceSyncStateRoute<D extends DeviceSyncState> {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
 
-        const repo: RepoUtils<D> = await this.getDeviceSyncStateRepo();
+        const repo: RepoUtils<D> = this.deviceSyncStateRepo!;
         const deviceSyncState: D | undefined = await repo.findOne(uid, { ignoreACL: true });
         if (!deviceSyncState) {
             throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);

@@ -71,11 +71,13 @@ export abstract class ResolveRecipientsCommand implements EasCommandHandler {
     private logger: any;
 
     @Init
-    public async init(): Promise<void> {
-        this.contactRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.contactClass.name,
-            args: [this.contactClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.contactRepo && this.contactClass) {
+            this.contactRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.contactClass.name, args: [this.contactClass] });
+        }
     }
 
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {

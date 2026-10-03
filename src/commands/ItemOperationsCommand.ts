@@ -168,34 +168,27 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
     private trustedRoles: string[] = ["admin"];
 
     @Init
-    public async init(): Promise<void> {
-        this.folderRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.folderClass.name,
-            args: [this.folderClass],
-        });
-        this.messageRepo = await this._objectFactory!.newInstance(RecoverableRepoUtils, {
-            name: this.messageClass.name,
-            args: [this.messageClass],
-        });
-        this.attachmentRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.attachmentClass.name,
-            args: [this.attachmentClass],
-        });
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.folderRepo && this.folderClass) {
+            this.folderRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
+        }
+        if (!this.messageRepo && this.messageClass) {
+            this.messageRepo = await this._objectFactory.newInstance(RecoverableRepoUtils, { name: this.messageClass.name, args: [this.messageClass] });
+        }
+        if (!this.attachmentRepo && this.attachmentClass) {
+            this.attachmentRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.attachmentClass.name, args: [this.attachmentClass] });
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
         if (!this.auditLogRepo && this.auditLogClass) {
-            this.auditLogRepo = await this._objectFactory!.newInstance(RepoUtils, {
-                name: this.auditLogClass.name,
-                args: [this.auditLogClass],
-            });
+            this.auditLogRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.auditLogClass.name, args: [this.auditLogClass] });
         }
         if (!this.auditLogUtils && this.auditLogRepo) {
-            this.auditLogUtils = await this._objectFactory!.newInstance(AuditLogUtils, {
-                name: this.auditLogClass.name,
-                args: [this.auditLogRepo],
-            });
+            this.auditLogUtils = await this._objectFactory.newInstance(AuditLogUtils, { name: this.auditLogClass.name, args: [this.auditLogRepo] });
         }
     }
 

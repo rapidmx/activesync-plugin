@@ -149,19 +149,19 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
     private logger: any;
 
     @Init
-    public async init(): Promise<void> {
-        this.folderRepo = await this._objectFactory!.newInstance(RecoverableRepoUtils, {
-            name: this.folderClass.name,
-            args: [this.folderClass],
-        });
-        this.messageRepo = await this._objectFactory!.newInstance(RecoverableRepoUtils, {
-            name: this.messageClass.name,
-            args: [this.messageClass],
-        });
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.folderRepo && this.folderClass) {
+            this.folderRepo = await this._objectFactory.newInstance(RecoverableRepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
+        }
+        if (!this.messageRepo && this.messageClass) {
+            this.messageRepo = await this._objectFactory.newInstance(RecoverableRepoUtils, { name: this.messageClass.name, args: [this.messageClass] });
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
     }
 
     /** Called once the outgoing message has been sent, only when the request carried a `<Source>` the caller may

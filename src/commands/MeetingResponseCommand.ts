@@ -120,19 +120,19 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
     private logger: any;
 
     @Init
-    public async init(): Promise<void> {
-        this.calendarEventRepo = await this._objectFactory!.newInstance(RecoverableRepoUtils, {
-            name: this.calendarEventClass.name,
-            args: [this.calendarEventClass],
-        });
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
-        this.messageRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.messageClass.name,
-            args: [this.messageClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.calendarEventRepo && this.calendarEventClass) {
+            this.calendarEventRepo = await this._objectFactory.newInstance(RecoverableRepoUtils, { name: this.calendarEventClass.name, args: [this.calendarEventClass] });
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
+        if (!this.messageRepo && this.messageClass) {
+            this.messageRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.messageClass.name, args: [this.messageClass] });
+        }
     }
 
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {

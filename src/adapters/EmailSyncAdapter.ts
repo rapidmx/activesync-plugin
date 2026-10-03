@@ -111,15 +111,16 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
     private blobStore?: BlobStore;
 
     @Init
-    public async init(): Promise<void> {
-        this.labelRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.labelClass.name,
-            args: [this.labelClass],
-        });
-        this.folderRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.folderClass.name,
-            args: [this.folderClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.labelRepo && this.labelClass) {
+            this.labelRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.labelClass.name, args: [this.labelClass] });
+        }
+        if (!this.folderRepo && this.folderClass) {
+            this.folderRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
+        }
     }
 
     public async toApplicationData(message: Message): Promise<WbxmlElement> {

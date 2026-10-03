@@ -44,11 +44,13 @@ export abstract class SettingsCommand implements EasCommandHandler {
     private mailboxRepo?: RepoUtils<any>;
 
     @Init
-    public async init(): Promise<void> {
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
     }
 
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {

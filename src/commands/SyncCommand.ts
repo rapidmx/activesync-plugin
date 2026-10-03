@@ -218,46 +218,40 @@ export abstract class SyncCommand implements EasCommandHandler {
     private auditLogUtils?: AuditLogUtils;
 
     @Init
-    public async init(): Promise<void> {
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
-        this.folderRepo = await this._objectFactory!.newInstance(RecoverableRepoUtils, {
-            name: this.folderClass.name,
-            args: [this.folderClass],
-        });
-        this.collectionStateRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.collectionStateClass.name,
-            args: [this.collectionStateClass],
-        });
-        this.collectionChunkRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.collectionChunkClass.name,
-            args: [this.collectionChunkClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
+        if (!this.folderRepo && this.folderClass) {
+            this.folderRepo = await this._objectFactory.newInstance(RecoverableRepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
+        }
+        if (!this.collectionStateRepo && this.collectionStateClass) {
+            this.collectionStateRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.collectionStateClass.name, args: [this.collectionStateClass] });
+        }
+        if (!this.collectionChunkRepo && this.collectionChunkClass) {
+            this.collectionChunkRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.collectionChunkClass.name, args: [this.collectionChunkClass] });
+        }
         for (const [collectionClass, binding] of Object.entries(this.collectionBindings)) {
-            // RecoverableRepoUtils: a soft-delete must bump `dateModified`/`version`, or the change stream this
-            // class enumerates would never see it.
-            this.repos.set(
-                collectionClass,
-                await this._objectFactory!.newInstance(RecoverableRepoUtils, {
-                    name: binding.entityClass.name,
-                    args: [binding.entityClass],
-                }),
-            );
-            this.adapters.set(collectionClass, await this._objectFactory!.newInstance(binding.adapterClass));
+            if (!this.repos.has(collectionClass)) {
+                // RecoverableRepoUtils: a soft-delete must bump `dateModified`/`version`, or the change stream
+                // enumerated here would never see it.
+                this.repos.set(
+                    collectionClass,
+                    await this._objectFactory.newInstance(RecoverableRepoUtils, { name: binding.entityClass.name, args: [binding.entityClass] }),
+                );
+            }
+            if (!this.adapters.has(collectionClass)) {
+                this.adapters.set(collectionClass, await this._objectFactory.newInstance(binding.adapterClass));
+            }
         }
         if (!this.auditLogRepo && this.auditLogClass) {
-            this.auditLogRepo = await this._objectFactory!.newInstance(RepoUtils, {
-                name: this.auditLogClass.name,
-                args: [this.auditLogClass],
-            });
+            this.auditLogRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.auditLogClass.name, args: [this.auditLogClass] });
         }
         if (!this.auditLogUtils && this.auditLogRepo) {
-            this.auditLogUtils = await this._objectFactory!.newInstance(AuditLogUtils, {
-                name: this.auditLogClass.name,
-                args: [this.auditLogRepo],
-            });
+            this.auditLogUtils = await this._objectFactory.newInstance(AuditLogUtils, { name: this.auditLogClass.name, args: [this.auditLogRepo] });
         }
     }
 

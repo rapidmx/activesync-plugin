@@ -133,31 +133,27 @@ export abstract class SearchCommand implements EasCommandHandler {
     private maxRangeEnd: number = 99;
 
     @Init
-    public async init(): Promise<void> {
-        this.contactRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.contactClass.name,
-            args: [this.contactClass],
-        });
-        this.messageRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.messageClass.name,
-            args: [this.messageClass],
-        });
-        this.emailAdapter = await this._objectFactory!.newInstance(this.emailAdapterClass);
-        this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, {
-            name: this.mailboxClass.name,
-            args: [this.mailboxClass],
-        });
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (!this.contactRepo && this.contactClass) {
+            this.contactRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.contactClass.name, args: [this.contactClass] });
+        }
+        if (!this.messageRepo && this.messageClass) {
+            this.messageRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.messageClass.name, args: [this.messageClass] });
+        }
+        if (!this.emailAdapter && this.emailAdapterClass) {
+            this.emailAdapter = await this._objectFactory.newInstance(this.emailAdapterClass);
+        }
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
         if (!this.auditLogRepo && this.auditLogClass) {
-            this.auditLogRepo = await this._objectFactory!.newInstance(RepoUtils, {
-                name: this.auditLogClass.name,
-                args: [this.auditLogClass],
-            });
+            this.auditLogRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.auditLogClass.name, args: [this.auditLogClass] });
         }
         if (!this.auditLogUtils && this.auditLogRepo) {
-            this.auditLogUtils = await this._objectFactory!.newInstance(AuditLogUtils, {
-                name: this.auditLogClass.name,
-                args: [this.auditLogRepo],
-            });
+            this.auditLogUtils = await this._objectFactory.newInstance(AuditLogUtils, { name: this.auditLogClass.name, args: [this.auditLogRepo] });
         }
     }
 
