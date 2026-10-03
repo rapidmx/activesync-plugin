@@ -2,19 +2,15 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import type { ObjectFactory } from "@rapidrest/core";
 import type { RepoUtils } from "@rapidrest/service-core";
-import { AuditAction, isNonOwnerAccess, recordAuditLog, type Mailbox } from "@rapidmx/restapi";
+import { AuditAction, isNonOwnerAccess, type AuditLogUtils, type Mailbox } from "@rapidmx/restapi";
 import type { EasCommandContext } from "./EasCommandHandler.js";
 
 /** What an `EasAuditLog` needs from the command using it. */
 export interface EasAuditDependencies {
-    objectFactory: ObjectFactory;
-    /** The concrete `AuditLogEntry` class (`AuditLogEntryMongo`/`AuditLogEntrySQL`). */
-    auditLogClass: any;
+    /** restapi's `AuditLogUtils` service, built once by the command's `@Init` hook over its audit-log repository. */
+    auditLogUtils: AuditLogUtils;
     mailboxRepo: RepoUtils<any>;
-    /** The whole configuration (`@Config()`), as restapi's routes pass it to `recordAuditLog()`. */
-    config?: any;
     logger?: any;
 }
 
@@ -30,7 +26,7 @@ export interface EasAuditEntry {
 
 /**
  * Audit entries for ActiveSync access to mail in a mailbox the caller doesn't own - an administrator reaching in
- * through a trusted role, or a delegate working in a shared folder. It uses restapi's `recordAuditLog()` and
+ * through a trusted role, or a delegate working in a shared folder. It uses restapi's `AuditLogUtils.record()` and
  * `isNonOwnerAccess()`, as `BaseMessageRoute` does: REST records `MESSAGE_CONTENT_ACCESSED` for a non-owner content
  * read and `MESSAGE_DELETE` for a delete.
  *
@@ -72,10 +68,7 @@ export class EasAuditLog {
             if (!(await this.isNonOwner(entry.mailboxUid))) {
                 return;
             }
-            await recordAuditLog(
-                this.deps.objectFactory,
-                this.deps.auditLogClass,
-                { config: this.deps.config, req: this.ctx.req, user: this.ctx.user, logger: this.deps.logger },
+            await this.deps.auditLogUtils.record(
                 {
                     action: entry.action,
                     targetType: entry.targetType,
@@ -83,6 +76,7 @@ export class EasAuditLog {
                     mailboxUid: entry.mailboxUid,
                     details: { protocol: "ActiveSync", command: this.command, deviceId: this.ctx.deviceId, ...entry.details },
                 },
+                { req: this.ctx.req, user: this.ctx.user },
             );
         } catch (err: any) {
             this.deps.logger?.warn(`${this.command}: failed to record audit entry ${entry.action} ${entry.targetType}:${entry.targetUid}: ${err?.message}`);

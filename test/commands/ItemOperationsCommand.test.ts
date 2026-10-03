@@ -17,7 +17,7 @@ import { encodeConversationId } from "../../src/adapters/EmailSyncAdapter.js";
 import { childText, element, findChild, opaqueElement, textElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { createHash } from "crypto";
-import { FolderType } from "@rapidmx/restapi";
+import { AuditLogUtils, FolderType } from "@rapidmx/restapi";
 import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 describe("ItemOperationsCommand Tests (guard clause only)", () => {
@@ -196,7 +196,7 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
             orphan: { uid: "orphan", version: 1, folderUid: "f-gone", mailboxUid: "deleted-mailbox", subject: "Orphan", bodyBlobKey: "b/orphan" },
         };
 
-        /** A command over in-memory rows whose audit entries go through restapi's real `recordAuditLog()` into `written`. */
+        /** A command over in-memory rows whose audit entries go through restapi's real `AuditLogUtils` into `written`. */
         function buildAudited(folderRows: any[] = []) {
             const objectFactory = new ObjectFactory(config, Logger());
             const command = objectFactory.newInstance<ItemOperationsCommandMongo>(ItemOperationsCommandMongo, { initialize: false }) as any;
@@ -206,11 +206,11 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
                 }
             }
             const written: any[] = [];
-            vi.spyOn(command._objectFactory, "newInstance").mockResolvedValue({ create: vi.fn(async (entry: any) => written.push(entry)) });
+            const auditLogUtils: any = new AuditLogUtils({ modelClass: FakeAuditLogEntry, create: vi.fn(async (entry: any) => written.push(entry)) } as any);
+            auditLogUtils.config = config;
             let remaining = [...folderRows];
             Object.assign(command, {
-                auditLogClass: FakeAuditLogEntry,
-                config,
+                auditLogUtils,
                 folderRepo: { findOne: vi.fn(async (uid: string) => ({ uid, mailboxUid: uid === "f-other" ? "other" : "mbx" })) },
                 messageRepo: {
                     findOne: vi.fn(async (uid: string) => rows[uid]),
@@ -287,14 +287,14 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
 
         it("Never fails the command when the audit entry can't be written.", async () => {
             const { command } = buildAudited();
-            vi.spyOn(command._objectFactory, "newInstance").mockRejectedValue(new Error("audit store down"));
-            command.logger = { warn: vi.fn() };
+            command.auditLogUtils.auditLogRepo.create.mockRejectedValue(new Error("audit store down"));
+            command.auditLogUtils.logger = { warn: vi.fn() };
             command.mailboxRepo.findOne.mockRejectedValue(new Error("db down"));
 
             const response = await command.handle(auditCtx([fetchBody("theirs")]));
 
             expect(childText(findChild(findChild(response, "Response")!, "Fetch")!, "Status")).toBe("1");
-            expect(command.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to persist audit log entry.*audit store down/));
+            expect(command.auditLogUtils.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to persist audit log entry.*audit store down/));
         });
 
         it("Fetch (Message body): a trusted-role stranger with READ elsewhere but not on this folder still gets 403, not let through by the role.", async () => {

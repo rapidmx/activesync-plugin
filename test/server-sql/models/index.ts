@@ -10,6 +10,7 @@ export {
     FolderSQL,
     LabelSQL,
     MailboxSQL,
+    MatterSQL,
     MessageSQL,
     TaskSQL,
 } from "@rapidmx/restapi/sql";

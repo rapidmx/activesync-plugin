@@ -7,6 +7,7 @@ import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import {
     AuditAction,
+    AuditLogUtils,
     asEntity,
     BlobStore,
     boundIndexedValue,
@@ -143,6 +144,8 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
     private mailboxRepo?: RepoUtils<any>;
     private messageRepo?: RecoverableRepoUtils<any>;
     private attachmentRepo?: RepoUtils<any>;
+    private auditLogRepo?: RepoUtils<any>;
+    private auditLogUtils?: AuditLogUtils;
 
     @Inject("BlobStore")
     private blobStore?: BlobStore;
@@ -182,6 +185,18 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
             name: this.mailboxClass.name,
             args: [this.mailboxClass],
         });
+        if (!this.auditLogRepo && this.auditLogClass) {
+            this.auditLogRepo = await this._objectFactory!.newInstance(RepoUtils, {
+                name: this.auditLogClass.name,
+                args: [this.auditLogClass],
+            });
+        }
+        if (!this.auditLogUtils && this.auditLogRepo) {
+            this.auditLogUtils = await this._objectFactory!.newInstance(AuditLogUtils, {
+                name: this.auditLogClass.name,
+                args: [this.auditLogRepo],
+            });
+        }
     }
 
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {
@@ -205,7 +220,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         }
 
         const audit = new EasAuditLog(
-            { objectFactory: this._objectFactory!, auditLogClass: this.auditLogClass, mailboxRepo: this.mailboxRepo, config: this.config, logger: this.logger },
+            { auditLogUtils: this.auditLogUtils!, mailboxRepo: this.mailboxRepo, logger: this.logger },
             ctx,
             this.command,
         );

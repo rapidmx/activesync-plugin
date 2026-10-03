@@ -15,6 +15,7 @@ import {
 import {
     asEntity,
     AuditAction,
+    AuditLogUtils,
     findOrCreateWellKnownFolder,
     hasMailAccess,
     type Folder,
@@ -213,6 +214,8 @@ export abstract class SyncCommand implements EasCommandHandler {
     private folderRepo?: RecoverableRepoUtils<any>;
     private collectionStateRepo?: RepoUtils<any>;
     private collectionChunkRepo?: RepoUtils<any>;
+    private auditLogRepo?: RepoUtils<any>;
+    private auditLogUtils?: AuditLogUtils;
 
     @Init
     public async init(): Promise<void> {
@@ -243,6 +246,18 @@ export abstract class SyncCommand implements EasCommandHandler {
                 }),
             );
             this.adapters.set(collectionClass, await this._objectFactory!.newInstance(binding.adapterClass));
+        }
+        if (!this.auditLogRepo && this.auditLogClass) {
+            this.auditLogRepo = await this._objectFactory!.newInstance(RepoUtils, {
+                name: this.auditLogClass.name,
+                args: [this.auditLogClass],
+            });
+        }
+        if (!this.auditLogUtils && this.auditLogRepo) {
+            this.auditLogUtils = await this._objectFactory!.newInstance(AuditLogUtils, {
+                name: this.auditLogClass.name,
+                args: [this.auditLogRepo],
+            });
         }
     }
 
@@ -280,7 +295,7 @@ export abstract class SyncCommand implements EasCommandHandler {
         const requestWindowSize: string | undefined = childText(ctx.request!, "WindowSize");
         const getMailbox = this.mailboxLoader(ctx.mailboxUid);
         const audit = new EasAuditLog(
-            { objectFactory: this._objectFactory!, auditLogClass: this.auditLogClass, mailboxRepo: this.mailboxRepo!, config: this.config, logger: this.logger },
+            { auditLogUtils: this.auditLogUtils!, mailboxRepo: this.mailboxRepo!, logger: this.logger },
             ctx,
             this.command,
         );

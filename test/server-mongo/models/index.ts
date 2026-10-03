@@ -12,6 +12,7 @@ export {
     FolderMongo,
     LabelMongo,
     MailboxMongo,
+    MatterMongo,
     MessageMongo,
     TaskMongo,
 } from "@rapidmx/restapi/mongo";

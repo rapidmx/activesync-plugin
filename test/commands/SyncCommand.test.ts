@@ -10,7 +10,7 @@
 import config from "../config.js";
 import { ApiError, Logger } from "@rapidrest/core";
 import { ApiErrors, ObjectFactory } from "@rapidrest/service-core";
-import { FolderType } from "@rapidmx/restapi";
+import { AuditLogUtils, FolderType } from "@rapidmx/restapi";
 import { MAX_SYNC_COLLECTIONS, MAX_SYNC_COMMANDS_PER_COLLECTION } from "../../src/commands/SyncCommand.js";
 import { SyncCommandMongo } from "../../src/commands/mongo/SyncCommandMongo.js";
 import { element, findChild, findChildren, childText, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
@@ -1116,7 +1116,7 @@ describe("SyncCommand Tests (isolated)", () => {
         };
         const shared = { uid: FOLDER_UID, mailboxUid: "mbx-2", type: FolderType.INBOX };
 
-        /** Gives `command` a real restapi `recordAuditLog()` path over a fake audit repository; returns the rows written. */
+        /** Gives `command` a real restapi `AuditLogUtils` over a fake audit repository; returns the rows written. */
         function withAudit(command: SyncCommandMongo): any[] {
             class FakeAuditLogEntry {
                 constructor(values: any) {
@@ -1124,9 +1124,9 @@ describe("SyncCommand Tests (isolated)", () => {
                 }
             }
             const written: any[] = [];
-            vi.spyOn((command as any)._objectFactory, "newInstance").mockResolvedValue({ create: vi.fn(async (entry: any) => written.push(entry)) });
-            (command as any).auditLogClass = FakeAuditLogEntry;
-            (command as any).config = config;
+            const auditLogUtils: any = new AuditLogUtils({ modelClass: FakeAuditLogEntry, create: vi.fn(async (entry: any) => written.push(entry)) } as any);
+            auditLogUtils.config = config;
+            (command as any).auditLogUtils = auditLogUtils;
             (command as any).mailboxRepo = { findOne: vi.fn(async (uid: string) => mailboxes[uid]) };
             return written;
         }

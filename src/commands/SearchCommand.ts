@@ -8,7 +8,7 @@ import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import type { EmailSyncAdapter } from "../adapters/EmailSyncAdapter.js";
-import { AuditAction, hasMailAccess, type Contact, type Message } from "@rapidmx/restapi";
+import { AuditAction, AuditLogUtils, hasMailAccess, type Contact, type Message } from "@rapidmx/restapi";
 import type { SearchProvider } from "@rapidmx/restapi/search";
 import { boundedEscapedPattern } from "../RegexPatternUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
@@ -112,6 +112,8 @@ export abstract class SearchCommand implements EasCommandHandler {
     private contactRepo?: RepoUtils<any>;
     private messageRepo?: RepoUtils<any>;
     private emailAdapter?: EmailSyncAdapter;
+    private auditLogRepo?: RepoUtils<any>;
+    private auditLogUtils?: AuditLogUtils;
 
     @Inject("SearchProvider")
     private searchProvider?: SearchProvider;
@@ -145,6 +147,18 @@ export abstract class SearchCommand implements EasCommandHandler {
             name: this.mailboxClass.name,
             args: [this.mailboxClass],
         });
+        if (!this.auditLogRepo && this.auditLogClass) {
+            this.auditLogRepo = await this._objectFactory!.newInstance(RepoUtils, {
+                name: this.auditLogClass.name,
+                args: [this.auditLogClass],
+            });
+        }
+        if (!this.auditLogUtils && this.auditLogRepo) {
+            this.auditLogUtils = await this._objectFactory!.newInstance(AuditLogUtils, {
+                name: this.auditLogClass.name,
+                args: [this.auditLogRepo],
+            });
+        }
     }
 
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {
@@ -302,7 +316,7 @@ export abstract class SearchCommand implements EasCommandHandler {
             return;
         }
         const audit = new EasAuditLog(
-            { objectFactory: this._objectFactory!, auditLogClass: this.auditLogClass, mailboxRepo: this.mailboxRepo!, config: this.config, logger: this.logger },
+            { auditLogUtils: this.auditLogUtils!, mailboxRepo: this.mailboxRepo!, logger: this.logger },
             ctx,
             this.command,
         );

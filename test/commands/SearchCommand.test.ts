@@ -9,6 +9,7 @@
 import config from "../config.js";
 import { ObjectFactory } from "@rapidrest/service-core";
 import { Logger } from "@rapidrest/core";
+import { AuditLogUtils } from "@rapidmx/restapi";
 import { SearchCommandMongo } from "../../src/commands/mongo/SearchCommandMongo.js";
 import { element, findChild, findChildren, childText, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
@@ -131,15 +132,15 @@ describe("SearchCommand Tests", () => {
                 Object.assign(this, values);
             }
         }
+        const written: any[] = [];
+        const auditLogUtils: any = new AuditLogUtils({ modelClass: FakeAuditLogEntry, create: vi.fn(async (entry: any) => written.push(entry)) } as any);
+        auditLogUtils.config = config;
         const command = buildCommand({
             messageRepo: { find: vi.fn().mockResolvedValue(messages) },
             mailboxRepo: { findOne: vi.fn(async (uid: string) => mailboxes[uid]) },
             searchProvider: { search: vi.fn().mockResolvedValue({ results: messages.map((message) => ({ entityType: "message", entityUid: message.uid, score: 1 })) }) },
-            auditLogClass: FakeAuditLogEntry,
-            config,
+            auditLogUtils,
         });
-        const written: any[] = [];
-        vi.spyOn((command as any)._objectFactory, "newInstance").mockResolvedValue({ create: vi.fn(async (entry: any) => written.push(entry)) });
 
         await command.handle({ user: { uid: "user-1" }, mailboxUid: "mbx-1", deviceId: "dev-1", request: mailboxRequest("x") } as unknown as EasCommandContext);
 

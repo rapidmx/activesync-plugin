@@ -728,7 +728,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/activesync-plugin@workspace:."
   dependencies:
-    "@rapidmx/restapi": "npm:^0.25.1"
+    "@rapidmx/restapi": "npm:^0.30.0"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/service-core": "npm:^2.3.0"
     "@swc/core": "npm:^1.16.2"
@@ -764,22 +764,22 @@ __metadata:
     vitest: "npm:^5.0.0"
     winston: "npm:^3.19.0"
   peerDependencies:
-    "@rapidmx/restapi": ">=0.10.0 <1"
+    "@rapidmx/restapi": ">=0.30.0 <1"
     "@rapidrest/core": 5.x
     "@rapidrest/service-core": 2.x
   languageName: unknown
   linkType: soft
 
-"@rapidmx/restapi@npm:^0.25.1":
-  version: 0.25.1
-  resolution: "@rapidmx/restapi@npm:0.25.1"
+"@rapidmx/restapi@npm:^0.30.0":
+  version: 0.30.0
+  resolution: "@rapidmx/restapi@npm:0.30.0"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
     html-to-text: "npm:^10.0.1"
     htmlparser2: "npm:^10.1.0"
     mailparser: "npm:^3.9.23"
-    nodemailer: "npm:^10.0.1"
+    nodemailer: "npm:^10.0.13"
     pst-extractor: "npm:^1.12.0"
     sanitize-html: "npm:^2.17.7"
     semver: "npm:^7.8.5"
@@ -805,7 +805,7 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/288a436499baf648ad947f50c8ed34671985c6425a84144e08484e87436ec56c62c1cc1bce353f75a70238ba16a98f1afc16c6c5f6189068d6593f746f4d6f68
+  checksum: 10c0/f3ddfa2ccbca252c6f0ec7ed6ab4bffee598ddad063e7f87c263d8ed3da890ff19ff593240b0f0fedd48f770309de313587376537dc0d1317020318e2ff21ce4
   languageName: node
   linkType: hard
 
@@ -4628,6 +4628,13 @@ __metadata:
   version: 10.0.1
   resolution: "nodemailer@npm:10.0.1"
   checksum: 10c0/2a6ad2c400fb8c7fe9edbbedb3ec7a805c216717548ebc6439cdecd4bdf1c232da7d84d46c74c406f99274b86bcf998a3b23ed7781aeddf580447bf9285730ec
+  languageName: node
+  linkType: hard
+
+"nodemailer@npm:^10.0.13":
+  version: 10.0.13
+  resolution: "nodemailer@npm:10.0.13"
+  checksum: 10c0/3004362415e977a3fdf2a0c0ec0ad9fd3724d5ccba3951763bd28fa13a6b87cab13e790c934ccb66b6657ca8149a7efc4cc973867760588169efd8ec3fb99908
   languageName: node
   linkType: hard
 

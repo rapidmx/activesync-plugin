@@ -4,7 +4,6 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Unit tests for EasAuditLog's owner decision and failure handling. The entries each command records are covered in
 // the ItemOperations/Sync/Search command tests, and end to end (a real AuditLogEntry row) in test/routes/{mongo,sql}.
-import config from "./config.js";
 import { AuditAction } from "@rapidmx/restapi";
 import { EasAuditLog } from "../src/EasAuditLog.js";
 import type { EasCommandContext } from "../src/EasCommandHandler.js";
@@ -19,7 +18,7 @@ describe("EasAuditLog Tests", () => {
             if (uid === "broken") throw new Error("db down");
             return mailboxes[uid];
         });
-        const audit = new EasAuditLog({ objectFactory: {} as any, auditLogClass: class {}, mailboxRepo: { findOne } as any, config }, ctx, "Sync");
+        const audit = new EasAuditLog({ auditLogUtils: { record: vi.fn() } as any, mailboxRepo: { findOne } as any }, ctx, "Sync");
 
         expect(await audit.isNonOwner("mbx-1")).toBe(false);
         expect(await audit.isNonOwner("mine")).toBe(false);
@@ -33,13 +32,13 @@ describe("EasAuditLog Tests", () => {
 
     it("Logs instead of throwing when recording fails outright.", async () => {
         const logger = { warn: vi.fn() };
-        const audit = new EasAuditLog({ objectFactory: {} as any, auditLogClass: class {}, mailboxRepo: undefined as any, config, logger }, ctx, "Sync");
+        const audit = new EasAuditLog({ auditLogUtils: { record: vi.fn() } as any, mailboxRepo: undefined as any, logger }, ctx, "Sync");
 
         await expect(audit.record(entry("theirs"))).resolves.toBeUndefined();
         expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^Sync: failed to record audit entry message\.delete Message:m1/));
 
         // Without a logger, too.
-        const silent = new EasAuditLog({ objectFactory: {} as any, auditLogClass: class {}, mailboxRepo: undefined as any, config }, ctx, "Sync");
+        const silent = new EasAuditLog({ auditLogUtils: { record: vi.fn() } as any, mailboxRepo: undefined as any }, ctx, "Sync");
         await expect(silent.record(entry("theirs"))).resolves.toBeUndefined();
     });
 });
