@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.16] - 2026-10-03
+
+### Changed
+- Record the audit log of the commands through the AuditLogUtils service of restapi 0.30, built once in the hook of each command
+- Require restapi 0.30 or later, and add the models of the matters to the test servers, which the legal hold check of restapi now needs
+
 ## [1.0.0-beta.15] - 2026-09-29
 
 ### Added
@@ -338,7 +344,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.15...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.16...HEAD
+[1.0.0-beta.16]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.15...v1.0.0-beta.16
 [1.0.0-beta.15]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.14...v1.0.0-beta.15
 [1.0.0-beta.14]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.13...v1.0.0-beta.14
 [1.0.0-beta.13]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.12...v1.0.0-beta.13
