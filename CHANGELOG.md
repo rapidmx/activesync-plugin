@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.17] - 2026-10-04
+
+### Changed
+- Publish a prerelease version to npm under the next tag, which npm requires, and a release under latest
+- Build the repositories, services and command handlers of the ActiveSync routes, commands and job through guarded @Init hooks and the ObjectFactory, and replace the lazy device sync state getter with a hook
+- Update @rapidmx/restapi to 0.30.1 A message a user sends is no longer refused with a 422 for a middling spam score or an rspamd greylist action
+
 ## [1.0.0-beta.16] - 2026-10-03
 
 ### Changed
@@ -344,7 +351,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.16...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.17...HEAD
+[1.0.0-beta.17]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.16...v1.0.0-beta.17
 [1.0.0-beta.16]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.15...v1.0.0-beta.16
 [1.0.0-beta.15]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.14...v1.0.0-beta.15
 [1.0.0-beta.14]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.13...v1.0.0-beta.14
