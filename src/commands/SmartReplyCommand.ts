@@ -15,6 +15,7 @@ import { asEntity, type Message } from "@rapidmx/restapi";
  */
 export abstract class SmartReplyCommand extends ComposeMailCommand {
     public readonly command = "SmartReply";
+    protected override readonly threadsToOriginal: boolean = true;
 
     protected override async markOriginal(ctx: EasCommandContext, original: Message & { uid: string; version: number }): Promise<void> {
         await this.messageRepo!.update(

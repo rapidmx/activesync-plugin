@@ -18,6 +18,7 @@ import {
     type Message,
     type Recipient,
     FolderType,
+    htmlToPlainText,
     MessageImportance,
     RecipientType,
 } from "@rapidmx/restapi";
@@ -38,6 +39,7 @@ const IMPORTANCE_BY_CODE: Record<string, MessageImportance> = {
 
 /** MS-ASAIRSYNCBASE `Body.Type`: 1 = plain text, 2 = HTML, 3 = RTF, 4 = MIME. */
 const BODY_TYPE_PLAIN_TEXT = "1";
+const BODY_TYPE_HTML = "2";
 
 /** MS-ASEMAIL `Flag/Status` value for an active (flagged, not completed) follow-up flag. */
 const FLAG_STATUS_ACTIVE = "2";
@@ -284,7 +286,10 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
             if (existing && !(await this.isDraft(existing))) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Only a Draft's body can be changed.");
             }
-            const text = (bodyEl && childText(bodyEl, "Data")) ?? "";
+            // A device composing HTML (Gmail does) sends `Body.Type` 2: the draft keeps its text, not the markup, which its preview and
+            // the plain-text MIME built below would otherwise show as literal tags.
+            const data = (bodyEl && childText(bodyEl, "Data")) ?? "";
+            const text = bodyEl && childText(bodyEl, "Type") === BODY_TYPE_HTML ? htmlToPlainText(data) : data;
             // Always a fresh key, never an overwrite of `existing.bodyBlobKey`: an existing blob may be shared, and
             // leaving it intact means a Change that then fails its version check can't corrupt the stored body.
             const bodyBlobKey = `bodies/${crypto.randomUUID()}`;

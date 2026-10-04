@@ -8,6 +8,7 @@ import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { ScanPipeline } from "@rapidmx/restapi/scan";
 import {
+    applyThreadHeaders,
     BlobStore,
     boundIndexedValue,
     findOrCreateWellKnownFolder,
@@ -171,6 +172,10 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         // No-op by default (plain SendMail has nothing to flag).
     }
 
+    /** Whether the message is a reply to its `<Source>`: it is then threaded to it (`In-Reply-To`/`References`, which a device's own
+     * reply MIME usually lacks), so the recipient's mail client and this server's own conversation view keep it in the one thread. */
+    protected readonly threadsToOriginal: boolean = false;
+
     public async handle(ctx: EasCommandContext): Promise<WbxmlElement | undefined> {
         if (!this.folderRepo || !this.messageRepo || !this.mailboxRepo || !this.blobStore || !this.mailTransport || !this.scanPipeline) {
             throw new ApiError(ApiErrors.INTERNAL_ERROR, 500, ApiErrorMessages.INTERNAL_ERROR);
@@ -199,6 +204,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
             saveInSentItemsRequested = firstQueryValue(ctx.query["SaveInSentItems"]) !== undefined;
             itemId = firstQueryValue(ctx.query["ItemId"]);
         }
+        this.logger?.info(`${this.command}: received ${raw?.length ?? 0} bytes (content-length ${firstQueryValue(ctx.req.headers["content-length"])}, transfer-encoding ${firstQueryValue(ctx.req.headers["transfer-encoding"])}, content-type ${firstQueryValue(ctx.req.headers["content-type"])}).`);
         if (!raw || raw.length === 0) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A SendMail/SmartForward/SmartReply request must include a MIME body.");
         }
@@ -264,7 +270,9 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         }
         /* v8 ignore stop */
 
-        const stripped: Buffer = stripHeader(raw, "bcc");
+        const composed: Buffer =
+            this.threadsToOriginal && original ? applyThreadHeaders(raw, { inReplyTo: original.messageId, references: [...original.references, original.messageId] }) : raw;
+        const stripped: Buffer = stripHeader(composed, "bcc");
         const relayed = await scanAndRelay(stripped, envelopeFrom, envelopeTo, this.scanPipeline, this.mailTransport, this.blobStore);
 
         if (saveInSentItemsRequested) {
@@ -272,7 +280,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
             // The Sent Items copy keeps its Bcc header, but must carry the `Message-ID` the message was actually relayed
             // with: `scanAndRelay()` injects one when the device's MIME had none, and recall/threading match on it.
             const stored: Buffer =
-                relayed.raw !== stripped ? prependHeaders(raw, [{ name: "Message-ID", value: `<${relayed.messageId}>` }]) : raw;
+                relayed.raw !== stripped ? prependHeaders(composed, [{ name: "Message-ID", value: `<${relayed.messageId}>` }]) : composed;
             await this.blobStore.put(bodyBlobKey, stored, { contentType: "message/rfc822" });
 
             const sentFolder: any = await findOrCreateWellKnownFolder(

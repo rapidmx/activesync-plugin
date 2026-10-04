@@ -149,6 +149,22 @@ describe("EmailSyncAdapter Tests", () => {
             ]);
         });
 
+        it("Keeps the text, not the markup, of a Draft whose Body is HTML (Type 2) in its preview and MIME.", async () => {
+            const { adapter, put } = buildAdapter();
+            const partial = await adapter.fromApplicationData(
+                appData([
+                    textElement(WbxmlCodePage.Email, "To", "to@example.com"),
+                    element(WbxmlCodePage.AirSyncBase, "Body", [
+                        textElement(WbxmlCodePage.AirSyncBase, "Type", "2"),
+                        textElement(WbxmlCodePage.AirSyncBase, "Data", "<div dir='auto'>Yay.</div>"),
+                    ]),
+                ]),
+            );
+
+            expect(partial.bodyPreview).toBe("Yay.");
+            expect((put.mock.calls[0][1] as Buffer).toString("utf-8")).not.toContain("<div");
+        });
+
         it("Includes a Bcc header in the built Draft MIME when Bcc recipients are present.", async () => {
             const { adapter, put } = buildAdapter();
             await adapter.fromApplicationData(

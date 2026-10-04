@@ -2218,6 +2218,8 @@ describe("Route:EasRouteSQL Tests", () => {
             const reply = await messageRepo.findOne({ where: { subject: "Re: Test Compose" } });
             expect(reply?.inReplyTo).toBe("<original@example.com>");
             expect(reply?.references).toEqual(["<earlier@example.com>", "<original@example.com>"]);
+            // The device's own MIME carries no threading headers: the reply is filed in the original's conversation all the same.
+            expect(reply?.conversationId).toBe("earlier@example.com");
         });
 
         it("SmartForward marks the original message Forwarded.", async () => {
