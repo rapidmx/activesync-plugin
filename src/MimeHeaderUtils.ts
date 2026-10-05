@@ -229,3 +229,18 @@ export function stripHeader(raw: Buffer, name: string): Buffer {
     }
     return Buffer.from(result + text.slice(copiedUpTo), "latin1");
 }
+
+/** Truncates UTF-8 text to at most `maxBytes` bytes without splitting a multi-byte character in half - backs
+ * off past any trailing UTF-8 continuation byte (`10xxxxxx`) before decoding back to a string. Only ever called
+ * once the caller has already confirmed the text exceeds `maxBytes` - trusts that rather than re-checking it
+ * here. Shared by `ItemOperationsCommand.fetchMessage()` (`BodyPreference` truncation on an explicit `Fetch`)
+ * and `EmailSyncAdapter` (the identical truncation when a `Sync` round's own `BodyPreference` asks for the real
+ * body inline, not just the short preview). */
+export function truncateUtf8(text: string, maxBytes: number): string {
+    const buf = Buffer.from(text, "utf8");
+    let end = maxBytes;
+    while (end > 0 && (buf[end] & 0xc0) === 0x80) {
+        end--;
+    }
+    return buf.subarray(0, end).toString("utf8");
+}

@@ -41,7 +41,7 @@ import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../Mess
 import { EasCollectionLease, type LeaseRelease } from "../EasCollectionLease.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
-import type { EasCollectionSyncAdapter } from "../adapters/EasCollectionSyncAdapter.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference } from "../adapters/EasCollectionSyncAdapter.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
@@ -372,6 +372,7 @@ export abstract class SyncCommand implements EasCommandHandler {
 
         const optionsEl: WbxmlElement | undefined = findChild(collectionEl, "Options");
         const requestedFilter: string | undefined = optionsEl ? childText(optionsEl, "FilterType") : undefined;
+        const bodyPreference: SyncBodyPreference | undefined = parseBodyPreference(optionsEl);
 
         if (!clientSyncKey || clientSyncKey === "0") {
             return await this.startCollection(ctx, stored, folderUid, collectionClass, requestedFilter);
@@ -469,8 +470,8 @@ export abstract class SyncCommand implements EasCommandHandler {
                 upserts.length === 0
                     ? []
                     : adapter.toApplicationDataBatch
-                      ? await adapter.toApplicationDataBatch(upserts.map((c) => c.item))
-                      : await Promise.all(upserts.map(async (c) => await adapter.toApplicationData(c.item)));
+                      ? await adapter.toApplicationDataBatch(upserts.map((c) => c.item), bodyPreference)
+                      : await Promise.all(upserts.map(async (c) => await adapter.toApplicationData(c.item, bodyPreference)));
         } catch (err: any) {
             // Logged with enough to find the one malformed item directly (collection/folder/uids), since the
             // state-ordering comment above means this failure is now merely retried, not corrupting - but a
@@ -818,4 +819,20 @@ export abstract class SyncCommand implements EasCommandHandler {
             ...extra,
         ]);
     }
+}
+
+/** Parses a collection's `Options/BodyPreference` (MS-ASAIRSYNCBASE), or `undefined` when the device sent none -
+ * the adapter then falls back to its own default rendering (`EmailSyncAdapter`'s short preview, unaffected). A
+ * `Type`-only `BodyPreference` (no `TruncationSize`) is "no truncation wanted", not "send nothing". */
+function parseBodyPreference(optionsEl: WbxmlElement | undefined): SyncBodyPreference | undefined {
+    const bodyPreferenceEl = optionsEl ? findChild(optionsEl, "BodyPreference") : undefined;
+    if (!bodyPreferenceEl) {
+        return undefined;
+    }
+    const truncationSizeText = childText(bodyPreferenceEl, "TruncationSize");
+    const truncationSize = truncationSizeText !== undefined ? Number(truncationSizeText) : undefined;
+    return {
+        type: childText(bodyPreferenceEl, "Type"),
+        truncationSize: truncationSize !== undefined && Number.isFinite(truncationSize) ? truncationSize : undefined,
+    };
 }

@@ -23,6 +23,7 @@ import { childText, element, findChild, findChildren, opaqueElement, textElement
 import { decodeConversationId } from "../adapters/EmailSyncAdapter.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
+import { truncateUtf8 } from "../MimeHeaderUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
@@ -50,19 +51,6 @@ export const MAX_EMPTY_FOLDER_BATCHES = 20;
 interface FetchResult {
     element: WbxmlElement;
     bytes: number;
-}
-
-/** Truncates UTF-8 text to at most `maxBytes` bytes without splitting a multi-byte character in half - backs
- * off past any trailing UTF-8 continuation byte (`10xxxxxx`) before decoding back to a string. Only ever
- * called once the caller has already confirmed the text exceeds `maxBytes` - trusts that rather than
- * re-checking it here. */
-function truncateUtf8(text: string, maxBytes: number): string {
-    const buf = Buffer.from(text, "utf8");
-    let end = maxBytes;
-    while (end > 0 && (buf[end] & 0xc0) === 0x80) {
-        end--;
-    }
-    return buf.subarray(0, end).toString("utf8");
 }
 
 /**

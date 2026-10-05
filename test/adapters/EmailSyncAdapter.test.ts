@@ -623,5 +623,77 @@ describe("EmailSyncAdapter Tests", () => {
             expect(meetingRequestOf(notAnInvite)).toBeUndefined();
             expect(get).toHaveBeenCalledTimes(2);
         });
+
+        const fieldOf = (el: WbxmlElement, tag: string): string | undefined => el.children.find((c) => c.tag === tag)?.text;
+
+        it("Renders MessageClass for a REQUEST/CANCEL invite - the signal a real client's Accept/Decline UI actually keys off, checked before it ever looks inside MeetingRequest - and omits it for an ordinary email.", async () => {
+            const { adapter } = buildAdapter();
+            const [request] = await adapter.toApplicationDataBatch([{ ...baseMessage, meetingMethod: "REQUEST" }]);
+            expect(fieldOf(request, "MessageClass")).toBe("IPM.Schedule.Meeting.Request");
+
+            const [cancel] = await adapter.toApplicationDataBatch([{ ...baseMessage, meetingMethod: "CANCEL" }]);
+            expect(fieldOf(cancel, "MessageClass")).toBe("IPM.Schedule.Meeting.Canceled");
+
+            const [reply] = await adapter.toApplicationDataBatch([{ ...baseMessage, meetingMethod: "REPLY" }]);
+            expect(fieldOf(reply, "MessageClass")).toBeUndefined();
+
+            const [plain] = await adapter.toApplicationDataBatch([baseMessage]);
+            expect(fieldOf(plain, "MessageClass")).toBeUndefined();
+        });
+
+        describe("BodyPreference", () => {
+            it("Falls back to the short bodyPreview, always Truncated 1, when the device sends no BodyPreference at all.", async () => {
+                const { adapter, get } = buildAdapter();
+                const [rendered] = await adapter.toApplicationDataBatch([baseMessage]);
+                const body = rendered.children.find((c) => c.tag === "Body")!;
+                expect(fieldOf(body, "Type")).toBe("1");
+                expect(fieldOf(body, "Data")).toBe(baseMessage.bodyPreview);
+                expect(fieldOf(body, "Truncated")).toBe("1");
+                expect(get).not.toHaveBeenCalled();
+            });
+
+            it("Sends the real plain-text body (parsed from bodyBlobKey's raw MIME) when the device asks for Type 1, marking Truncated 0 when it fits whole.", async () => {
+                const { adapter, get } = buildAdapter();
+                get.mockResolvedValue(Buffer.from("Subject: X\r\nFrom: a@x.com\r\n\r\nThe full real body, much longer than the preview.", "utf-8"));
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, bodyBlobKey: "bodies/full-1" }], { type: "1" });
+                expect(get).toHaveBeenCalledWith("bodies/full-1");
+                const body = rendered.children.find((c) => c.tag === "Body")!;
+                expect(fieldOf(body, "Type")).toBe("1");
+                expect(fieldOf(body, "Data")).toBe("The full real body, much longer than the preview.");
+                expect(fieldOf(body, "Truncated")).toBe("0");
+            });
+
+            it("Prefers the already-sanitized HTML body over raw-MIME-derived text when the device asks for Type 2 and one exists.", async () => {
+                const { adapter, get } = buildAdapter();
+                get.mockResolvedValue(Buffer.from("<p>Sanitized HTML body</p>", "utf-8"));
+                const [rendered] = await adapter.toApplicationDataBatch(
+                    [{ ...baseMessage, bodyBlobKey: "bodies/x", sanitizedHtmlBlobKey: "sanitized/x" }],
+                    { type: "2" },
+                );
+                expect(get).toHaveBeenCalledWith("sanitized/x");
+                const body = rendered.children.find((c) => c.tag === "Body")!;
+                expect(fieldOf(body, "Type")).toBe("2");
+                expect(fieldOf(body, "Data")).toBe("<p>Sanitized HTML body</p>");
+            });
+
+            it("Truncates to the requested TruncationSize and marks Truncated 1, reporting the pre-truncation EstimatedDataSize - the same truncateUtf8() ItemOperationsCommand.fetchMessage() already uses, shared rather than reimplemented.", async () => {
+                const { adapter, get } = buildAdapter();
+                get.mockResolvedValue(Buffer.from("Subject: X\r\n\r\n0123456789", "utf-8"));
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, bodyBlobKey: "bodies/long" }], { type: "1", truncationSize: 5 });
+                const body = rendered.children.find((c) => c.tag === "Body")!;
+                expect(fieldOf(body, "Data")).toBe("01234");
+                expect(fieldOf(body, "Truncated")).toBe("1");
+                expect(fieldOf(body, "EstimatedDataSize")).toBe("10");
+            });
+
+            it("Falls back to the short bodyPreview for one message whose blob can't be read, without failing the whole batch.", async () => {
+                const { adapter, get } = buildAdapter();
+                get.mockRejectedValueOnce(new Error("blob store down"));
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, bodyBlobKey: "bodies/missing" }], { type: "1" });
+                const body = rendered.children.find((c) => c.tag === "Body")!;
+                expect(fieldOf(body, "Data")).toBe(baseMessage.bodyPreview);
+                expect(fieldOf(body, "Truncated")).toBe("1");
+            });
+        });
     });
 });

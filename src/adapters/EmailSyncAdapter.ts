@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import * as crypto from "crypto";
+import { simpleParser } from "mailparser";
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, opaqueElement, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { toCompactDateTime } from "../CompactDateTime.js";
-import type { EasCollectionSyncAdapter } from "./EasCollectionSyncAdapter.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference } from "./EasCollectionSyncAdapter.js";
 import { isGenuineDraft } from "../MessageMoveRules.js";
+import { truncateUtf8 } from "../MimeHeaderUtils.js";
 import {
     type Attachment,
     type BlobStore,
@@ -46,6 +48,30 @@ const IMPORTANCE_BY_CODE: Record<string, MessageImportance> = {
 /** MS-ASAIRSYNCBASE `Body.Type`: 1 = plain text, 2 = HTML, 3 = RTF, 4 = MIME. */
 const BODY_TYPE_PLAIN_TEXT = "1";
 const BODY_TYPE_HTML = "2";
+
+/**
+ * MS-OXCMAIL/MS-OXOCAL `MessageClass` for a meeting-invite email, keyed by its iTIP `METHOD`
+ * (`Message.meetingMethod`). This is what a real Exchange-compatible client actually keys its "show Accept/
+ * Tentative/Decline" UI off of - checked *before* it ever looks inside `MeetingRequest`'s own child elements -
+ * so a `MeetingRequest` element with no `MessageClass` (or the default `IPM.Note`) is commonly just ignored,
+ * falling back to showing the message as a plain email with its `.ics` as an ordinary attachment. `REPLY`/
+ * `COUNTER` have no single well-known class this pragmatic subset renders specially (an incoming reply/counter
+ * is informational to the organizer, not something the recipient needs their own Accept/Decline UI for) -
+ * `PUBLISH` likewise has no distinct class of its own (it's conventionally just `IPM.Note` with a calendar
+ * attachment, which is already what omitting this tag naturally produces). */
+const MESSAGE_CLASS_BY_METHOD: Partial<Record<string, string>> = {
+    REQUEST: "IPM.Schedule.Meeting.Request",
+    CANCEL: "IPM.Schedule.Meeting.Canceled",
+};
+
+/** A message's body as actually resolved for `Sync` (see `resolveBodies()`), honoring the device's own
+ * `BodyPreference` instead of always being the short `bodyPreview`. */
+interface RenderedBody {
+    type: string;
+    data: string;
+    truncated: boolean;
+    estimatedDataSize: number;
+}
 
 /** MS-ASEMAIL `Flag/Status` value for an active (flagged, not completed) follow-up flag. */
 const FLAG_STATUS_ACTIVE = "2";
@@ -151,18 +177,19 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         }
     }
 
-    public async toApplicationData(message: Message): Promise<WbxmlElement> {
-        return (await this.toApplicationDataBatch([message]))[0];
+    public async toApplicationData(message: Message, bodyPreference?: SyncBodyPreference): Promise<WbxmlElement> {
+        return (await this.toApplicationDataBatch([message], bodyPreference))[0];
     }
 
     /** Renders a whole page of messages, resolving every referenced `Label` with one `find()` per distinct
      * mailbox (in practice one per page) instead of one per labelled message, and likewise batching the
-     * `Attachment`/`MeetingRequest` lookups below rather than doing either per message. */
-    public async toApplicationDataBatch(messages: Message[]): Promise<WbxmlElement[]> {
-        const [labelNames, attachmentsByMessage, meetingRequestsByMessage] = await Promise.all([
+     * `Attachment`/`MeetingRequest`/body lookups below rather than doing any of them per message. */
+    public async toApplicationDataBatch(messages: Message[], bodyPreference?: SyncBodyPreference): Promise<WbxmlElement[]> {
+        const [labelNames, attachmentsByMessage, meetingRequestsByMessage, bodiesByMessage] = await Promise.all([
             this.resolveLabelNames(messages),
             this.resolveAttachments(messages),
             this.resolveMeetingRequests(messages),
+            this.resolveBodies(messages, bodyPreference),
         ]);
         return messages.map((message) => {
             const categories: string[] = [];
@@ -172,7 +199,13 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                     categories.push(name);
                 }
             }
-            return this.render(message, categories, attachmentsByMessage.get(message.uid) ?? [], meetingRequestsByMessage.get(message.uid));
+            return this.render(
+                message,
+                categories,
+                attachmentsByMessage.get(message.uid) ?? [],
+                meetingRequestsByMessage.get(message.uid),
+                bodiesByMessage.get(message.uid),
+            );
         });
     }
 
@@ -225,10 +258,61 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         return byMessage;
     }
 
-    private render(message: Message, categories: string[], attachments: Attachment[], meetingRequest: WbxmlElement | undefined): WbxmlElement {
+    /** Resolves every message to its real body text (not just `bodyPreview`), honoring the device's own
+     * `BodyPreference` - mirrors `ItemOperationsCommand.fetchMessage()`'s exact same source-preference and
+     * truncation logic, just applied to a whole `Sync` page in parallel instead of one `ItemOperations Fetch`
+     * at a time. Returns an empty map (every message falls back to `render()`'s own `bodyPreview` default) when
+     * the device sent no `BodyPreference` at all - many real EAS clients do send one and expect the (near-)full
+     * body inline in `Sync` itself, not a short preview requiring a separate `Fetch` round trip for ordinary
+     * reading; this was discovered live (a real device showing truncated mail that the web client renders in
+     * full), not assumed in advance. A message whose blob can't be read falls back to the short preview, same
+     * tolerant-of-a-bad-reference stance as this file's other per-message batch lookups. */
+    private async resolveBodies(messages: Message[], bodyPreference: SyncBodyPreference | undefined): Promise<Map<string, RenderedBody>> {
+        const byMessage = new Map<string, RenderedBody>();
+        if (!bodyPreference) {
+            return byMessage;
+        }
+        const wantsHtml = bodyPreference.type === BODY_TYPE_HTML;
+        await Promise.all(
+            messages.map(async (message) => {
+                try {
+                    let type = BODY_TYPE_PLAIN_TEXT;
+                    let text: string;
+                    if (wantsHtml && message.sanitizedHtmlBlobKey) {
+                        type = BODY_TYPE_HTML;
+                        text = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
+                    } else {
+                        const raw = await this.blobStore!.get(message.bodyBlobKey);
+                        const parsed = await simpleParser(raw);
+                        text = parsed.text ?? message.bodyPreview;
+                    }
+                    const estimatedDataSize = Buffer.byteLength(text, "utf8");
+                    let truncated = false;
+                    if (bodyPreference.truncationSize !== undefined && estimatedDataSize > bodyPreference.truncationSize) {
+                        text = truncateUtf8(text, bodyPreference.truncationSize);
+                        truncated = true;
+                    }
+                    byMessage.set(message.uid, { type, data: text, truncated, estimatedDataSize });
+                } catch {
+                    // Blob unreadable/missing: this one message keeps render()'s short-preview fallback rather
+                    // than fail the whole Sync round over it.
+                }
+            }),
+        );
+        return byMessage;
+    }
+
+    private render(
+        message: Message,
+        categories: string[],
+        attachments: Attachment[],
+        meetingRequest: WbxmlElement | undefined,
+        body: RenderedBody | undefined,
+    ): WbxmlElement {
         const to = message.recipients.filter((r) => r.type === RecipientType.TO).map((r) => r.address);
         const cc = message.recipients.filter((r) => r.type === RecipientType.CC).map((r) => r.address);
         const bcc = message.recipients.filter((r) => r.type === RecipientType.BCC).map((r) => r.address);
+        const messageClass = message.meetingMethod ? MESSAGE_CLASS_BY_METHOD[message.meetingMethod] : undefined;
 
         return element(WbxmlCodePage.AirSync, "ApplicationData", [
             textElement(WbxmlCodePage.Email, "Subject", message.subject),
@@ -241,11 +325,14 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
             textElement(WbxmlCodePage.Email, "Read", message.flags.read ? "1" : "0"),
             // MS-ASEMAIL `Flag` is a container: `<Flag><Status>2</Status></Flag>` (active) or an empty `<Flag/>`.
             element(WbxmlCodePage.Email, "Flag", message.flags.flagged ? [textElement(WbxmlCodePage.Email, "FlagStatus", FLAG_STATUS_ACTIVE)] : []),
+            // See `MESSAGE_CLASS_BY_METHOD`'s own doc comment: this is the real signal a client keys its
+            // Accept/Tentative/Decline UI off of, checked before it ever looks inside `MeetingRequest` itself.
+            ...(messageClass ? [textElement(WbxmlCodePage.Email, "MessageClass", messageClass)] : []),
             element(WbxmlCodePage.AirSyncBase, "Body", [
-                textElement(WbxmlCodePage.AirSyncBase, "Type", BODY_TYPE_PLAIN_TEXT),
-                textElement(WbxmlCodePage.AirSyncBase, "EstimatedDataSize", String(Buffer.byteLength(message.bodyPreview, "utf8"))),
-                textElement(WbxmlCodePage.AirSyncBase, "Truncated", "1"),
-                textElement(WbxmlCodePage.AirSyncBase, "Data", message.bodyPreview),
+                textElement(WbxmlCodePage.AirSyncBase, "Type", body?.type ?? BODY_TYPE_PLAIN_TEXT),
+                textElement(WbxmlCodePage.AirSyncBase, "EstimatedDataSize", String(body?.estimatedDataSize ?? Buffer.byteLength(message.bodyPreview, "utf8"))),
+                textElement(WbxmlCodePage.AirSyncBase, "Truncated", body ? (body.truncated ? "1" : "0") : "1"),
+                textElement(WbxmlCodePage.AirSyncBase, "Data", body?.data ?? message.bodyPreview),
             ]),
             ...(message.conversationId ? [opaqueElement(WbxmlCodePage.Email2, "ConversationId", encodeConversationId(message.conversationId))] : []),
             ...(categories.length > 0

@@ -20,6 +20,17 @@ import type { WbxmlElement } from "../codec/WbxmlElement.js";
  *
  * @author Jean-Philippe Steinmetz
  */
+/** The device's MS-ASAIRSYNCBASE `Options/BodyPreference` for a collection's `Sync` round, as `SyncCommand`
+ * parses it from the request - `type` is the requested `Body.Type` (`"1"` plain text, `"2"` HTML; anything else
+ * falls back to plain text), `truncationSize` the most bytes of it the device wants inline, or `undefined` for
+ * no limit (MS-ASAIRSYNCBASE leaves `TruncationSize` optional; its absence is read as "no truncation wanted",
+ * not "send nothing"). Only `EmailSyncAdapter` uses this today - every other adapter's `Body` (where it renders
+ * one at all) is small enough that this doesn't apply. */
+export interface SyncBodyPreference {
+    type?: string;
+    truncationSize?: number;
+}
+
 export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
     /** The MS-ASCMD `Class` value this adapter handles, e.g. `"Email"`. */
     readonly collectionClass: string;
@@ -27,13 +38,15 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
     /** Builds the `<ApplicationData>` element for one `Add`/`Change` command reporting `item`. May return a
      * `Promise` - `EmailSyncAdapter` needs this to resolve `Message.labelUids` against the `Label` repo before
      * rendering `Categories`; every other adapter today returns a plain `WbxmlElement`, which callers `await`
-     * through unchanged (the same optional-async shape `fromApplicationData` already established below). */
-    toApplicationData(item: T): WbxmlElement | Promise<WbxmlElement>;
+     * through unchanged (the same optional-async shape `fromApplicationData` already established below).
+     * `bodyPreference` is the device's `Options/BodyPreference` for this round, when it sent one - adapters that
+     * don't need it (everything but `EmailSyncAdapter`) simply ignore the parameter. */
+    toApplicationData(item: T, bodyPreference?: SyncBodyPreference): WbxmlElement | Promise<WbxmlElement>;
 
     /** Optional bulk form of `toApplicationData`, returning one element per item in the same order. Implemented
      * where rendering needs a lookup that is far cheaper done once for a whole page (`EmailSyncAdapter`'s
-     * `Label` resolution); callers fall back to per-item `toApplicationData` when absent. */
-    toApplicationDataBatch?(items: T[]): Promise<WbxmlElement[]>;
+     * `Label`/`Attachment`/body-blob resolution); callers fall back to per-item `toApplicationData` when absent. */
+    toApplicationDataBatch?(items: T[], bodyPreference?: SyncBodyPreference): Promise<WbxmlElement[]>;
 
     /**
      * Parses one client-originated `Add`/`Change` command's `<ApplicationData>` element (`el`) into a partial

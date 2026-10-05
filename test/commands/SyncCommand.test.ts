@@ -585,6 +585,33 @@ describe("SyncCommand Tests (isolated)", () => {
             const response = await command.handle(buildContext(syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Fetch", [])])).ctx);
             expect(findChild(collection(response!), "Responses")).toBeUndefined();
         });
+
+        it("Parses Options/BodyPreference and passes it to the adapter's render call, so an adapter that cares (EmailSyncAdapter) can honour it - undefined when the device sent none.", async () => {
+            const repoWith = (): any =>
+                fakeRepo({
+                    find: vi.fn().mockImplementation(async (query: any) =>
+                        !query.deleted && query.folderUid === FOLDER_UID
+                            ? [{ uid: "item-1", folderUid: FOLDER_UID, dateModified: new Date("2026-02-01T00:00:00.000Z") }]
+                            : [],
+                    ),
+                });
+
+            const withPreference = vi.fn().mockResolvedValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
+            const { command: commandWith } = await buildCommand("Fake", fakeAdapter({ toApplicationData: withPreference }), repoWith());
+            const bodyPreferenceOptions = element(WbxmlCodePage.AirSync, "Options", [
+                element(WbxmlCodePage.AirSyncBase, "BodyPreference", [
+                    textElement(WbxmlCodePage.AirSyncBase, "Type", "2"),
+                    textElement(WbxmlCodePage.AirSyncBase, "TruncationSize", "4096"),
+                ]),
+            ]);
+            await commandWith.handle(buildContext(syncRequest("Fake", [], [bodyPreferenceOptions])).ctx);
+            expect(withPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), { type: "2", truncationSize: 4096 });
+
+            const withoutPreference = vi.fn().mockResolvedValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
+            const { command: commandWithout } = await buildCommand("Fake", fakeAdapter({ toApplicationData: withoutPreference }), repoWith());
+            await commandWithout.handle(buildContext(syncRequest("Fake", [])).ctx);
+            expect(withoutPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), undefined);
+        });
     });
 
     describe("ACL/ownership enforcement (IDOR regression coverage)", () => {
