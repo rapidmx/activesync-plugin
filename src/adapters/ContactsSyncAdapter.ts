@@ -42,25 +42,36 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
 
     public toApplicationData(contact: Contact): WbxmlElement {
         const children: WbxmlElement[] = [
-            textElement(WbxmlCodePage.Contacts, "FileAs", contact.displayName),
+            // `?? ""` - a defensive fallback, not an expected case: `displayName` is typed as a required `string`,
+            // but (the same "TypeORM hands back `null` for an unset column" hazard already documented on
+            // `CalendarSyncAdapter`'s `organizer`/`reminderMinutesBeforeStart`) a row written before a NOT NULL
+            // default existed, or by a path outside this library's own writers, could still hydrate `null` here -
+            // and the WBXML encoder writes a `null` `text` value (it only treats `undefined` as "no content")
+            // rather than rejecting it, so an unguarded `null` would throw deep inside the encoder instead of
+            // rendering a usable (if blank) `FileAs`.
+            textElement(WbxmlCodePage.Contacts, "FileAs", contact.displayName ?? ""),
             ...(contact.givenName ? [textElement(WbxmlCodePage.Contacts, "FirstName", contact.givenName)] : []),
             ...(contact.surname ? [textElement(WbxmlCodePage.Contacts, "LastName", contact.surname)] : []),
             ...(contact.company ? [textElement(WbxmlCodePage.Contacts, "CompanyName", contact.company)] : []),
             ...(contact.jobTitle ? [textElement(WbxmlCodePage.Contacts, "JobTitle", contact.jobTitle)] : []),
         ];
 
-        contact.emails.slice(0, EMAIL_TAGS.length).forEach((email, i) => {
+        // `?? []` on `emails`/`phones`/`addresses` below - same reasoning as `displayName` above: each is typed as
+        // a required array, but a `simple-json` column (SQL) or document field (Mongo) written `null`/absent by
+        // some path other than this library's own constructors hydrates as `null`/`undefined`, not `[]`, and
+        // `.slice()`/`for...of` on that throws rather than rendering a contact with no entries of that kind.
+        (contact.emails ?? []).slice(0, EMAIL_TAGS.length).forEach((email, i) => {
             children.push(textElement(WbxmlCodePage.Contacts, EMAIL_TAGS[i], email.address));
         });
 
-        for (const phone of contact.phones) {
+        for (const phone of contact.phones ?? []) {
             const tag = PHONE_TAG[phone.type];
             if (tag) {
                 children.push(textElement(WbxmlCodePage.Contacts, tag, phone.phoneNumber));
             }
         }
 
-        for (const address of contact.addresses) {
+        for (const address of contact.addresses ?? []) {
             children.push(...this.addressElements(address));
         }
 
