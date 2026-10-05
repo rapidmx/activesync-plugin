@@ -19,6 +19,7 @@ import { FolderType, MessageImportance, RecipientType, type Mailbox, type Messag
 class TestEmailSyncAdapter extends EmailSyncAdapter {
     protected labelClass: any = {};
     protected folderClass: any = {};
+    protected attachmentClass: any = {};
 }
 
 function appData(children: WbxmlElement[]): WbxmlElement {
@@ -28,18 +29,67 @@ function appData(children: WbxmlElement[]): WbxmlElement {
 function buildAdapter(folderType: FolderType = FolderType.DRAFTS): {
     adapter: EmailSyncAdapter;
     put: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
     labelFind: ReturnType<typeof vi.fn>;
     folderFindOne: ReturnType<typeof vi.fn>;
+    attachmentFind: ReturnType<typeof vi.fn>;
 } {
     const adapter = new TestEmailSyncAdapter();
     const put = vi.fn().mockResolvedValue(undefined);
-    (adapter as any).blobStore = { put, get: vi.fn(), getStream: vi.fn(), delete: vi.fn(), exists: vi.fn(), size: vi.fn() };
+    const get = vi.fn().mockResolvedValue(Buffer.from(""));
+    (adapter as any).blobStore = { put, get, getStream: vi.fn(), delete: vi.fn(), exists: vi.fn(), size: vi.fn() };
     const labelFind = vi.fn().mockResolvedValue([]);
     (adapter as any).labelRepo = { find: labelFind };
     const folderFindOne = vi.fn().mockResolvedValue({ uid: "folder-1", type: folderType });
     (adapter as any).folderRepo = { findOne: folderFindOne };
-    return { adapter, put, labelFind, folderFindOne };
+    const attachmentFind = vi.fn().mockResolvedValue([]);
+    (adapter as any).attachmentRepo = { find: attachmentFind };
+    return { adapter, put, get, labelFind, folderFindOne, attachmentFind };
 }
+
+/** A minimal multipart/mixed raw MIME message carrying a `text/calendar` part - the shape
+ * `extractIcsFromRaw()` (`simpleParser` under the hood) reads an invite's `.ics` out of. */
+function inviteRawMime(ics: string): Buffer {
+    return Buffer.from(
+        [
+            "Subject: Team Sync",
+            "From: organizer@example.com",
+            "To: owner@example.com",
+            "MIME-Version: 1.0",
+            'Content-Type: multipart/mixed; boundary="BOUNDARY"',
+            "",
+            "--BOUNDARY",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            "You're invited.",
+            "",
+            "--BOUNDARY",
+            'Content-Type: text/calendar; method=REQUEST; charset=utf-8; name="invite.ics"',
+            'Content-Disposition: attachment; filename="invite.ics"',
+            "",
+            ics,
+            "",
+            "--BOUNDARY--",
+            "",
+        ].join("\r\n"),
+    );
+}
+
+const VALID_INVITE_ICS = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "METHOD:REQUEST",
+    "BEGIN:VEVENT",
+    "UID:evt-1",
+    "SEQUENCE:0",
+    "DTSTART:20260615T120000Z",
+    "DTEND:20260615T130000Z",
+    "SUMMARY:Team Sync",
+    "LOCATION:Conference Room",
+    "ORGANIZER;CN=Boss:mailto:boss@example.com",
+    "END:VEVENT",
+    "END:VCALENDAR",
+].join("\r\n");
 
 const baseMessage: Message = {
     uid: "msg-1",
@@ -505,6 +555,73 @@ describe("EmailSyncAdapter Tests", () => {
             expect(await adapter.toApplicationData(baseMessage)).toEqual(batched);
             expect(await adapter.toApplicationDataBatch([])).toEqual([]);
             expect(labelFind).not.toHaveBeenCalled();
+        });
+
+        const attachmentsOf = (el: WbxmlElement) => el.children.find((child) => child.tag === "Attachments")?.children;
+        const meetingRequestOf = (el: WbxmlElement) => el.children.find((child) => child.tag === "MeetingRequest");
+
+        it("Renders Attachments for every hasAttachments message in one in(...) query, and queries nothing when none have attachments.", async () => {
+            const { adapter, attachmentFind } = buildAdapter();
+            attachmentFind.mockResolvedValue([
+                { uid: "att-1", messageUid: "m1", filename: "report.pdf", mimeType: "application/pdf", sizeBytes: 1234, isInline: false },
+                { uid: "att-2", messageUid: "m1", filename: "logo.png", mimeType: "image/png", sizeBytes: 42, isInline: true, contentId: "logo@inline" },
+            ]);
+            const [withAttachments, without] = await adapter.toApplicationDataBatch([
+                { ...baseMessage, uid: "m1", hasAttachments: true },
+                { ...baseMessage, uid: "m2", hasAttachments: false },
+            ]);
+
+            expect(attachmentFind).toHaveBeenCalledTimes(1);
+            expect(attachmentFind.mock.calls[0][0].messageUid).toBe("in(m1)");
+            const rendered = attachmentsOf(withAttachments)!;
+            expect(rendered.map((a) => a.children.find((c) => c.tag === "DisplayName")?.text)).toEqual(["report.pdf", "logo.png"]);
+            expect(rendered[0].children.find((c) => c.tag === "FileReference")?.text).toBe("att-1");
+            expect(rendered[0].children.find((c) => c.tag === "EstimatedDataSize")?.text).toBe("1234");
+            expect(rendered[0].children.find((c) => c.tag === "IsInline")?.text).toBe("0");
+            expect(rendered[1].children.find((c) => c.tag === "IsInline")?.text).toBe("1");
+            expect(rendered[1].children.find((c) => c.tag === "ContentId")?.text).toBe("logo@inline");
+            expect(attachmentsOf(without)).toBeUndefined();
+
+            attachmentFind.mockClear();
+            await adapter.toApplicationDataBatch([{ ...baseMessage, hasAttachments: false }]);
+            expect(attachmentFind).not.toHaveBeenCalled();
+        });
+
+        it("Renders a MeetingRequest for a REQUEST invite whose raw MIME has a readable .ics, derived via the shared restapi invite-parsing utilities.", async () => {
+            const { adapter, get } = buildAdapter();
+            get.mockResolvedValue(inviteRawMime(VALID_INVITE_ICS));
+
+            const [rendered] = await adapter.toApplicationDataBatch([
+                { ...baseMessage, meetingMethod: "REQUEST", bodyBlobKey: "bodies/invite-1" },
+            ]);
+
+            expect(get).toHaveBeenCalledWith("bodies/invite-1");
+            const meetingRequest = meetingRequestOf(rendered)!;
+            expect(meetingRequest).toBeDefined();
+            const field = (tag: string) => meetingRequest.children.find((c) => c.tag === tag)?.text;
+            expect(field("StartTime")).toBe("20260615T120000Z");
+            expect(field("EndTime")).toBe("20260615T130000Z");
+            expect(field("Location")).toBe("Conference Room");
+            expect(field("Organizer")).toBe("boss@example.com");
+            expect(field("AllDayEvent")).toBe("0");
+            expect(field("ResponseRequested")).toBe("1");
+            expect(field("InstanceType")).toBe("0");
+        });
+
+        it("Omits MeetingRequest (without failing the message) when the .ics is unreadable, has no method, or is simply absent.", async () => {
+            const { adapter, get } = buildAdapter();
+
+            get.mockResolvedValueOnce(inviteRawMime("not a valid calendar file"));
+            const [unreadable] = await adapter.toApplicationDataBatch([{ ...baseMessage, meetingMethod: "REQUEST", bodyBlobKey: "bodies/bad" }]);
+            expect(meetingRequestOf(unreadable)).toBeUndefined();
+
+            get.mockRejectedValueOnce(new Error("blob store down"));
+            const [blobFailure] = await adapter.toApplicationDataBatch([{ ...baseMessage, meetingMethod: "REQUEST", bodyBlobKey: "bodies/missing" }]);
+            expect(meetingRequestOf(blobFailure)).toBeUndefined();
+
+            const [notAnInvite] = await adapter.toApplicationDataBatch([{ ...baseMessage, bodyBlobKey: "bodies/plain" }]);
+            expect(meetingRequestOf(notAnInvite)).toBeUndefined();
+            expect(get).toHaveBeenCalledTimes(2);
         });
     });
 });

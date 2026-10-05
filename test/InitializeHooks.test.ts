@@ -50,6 +50,7 @@ const cases: Case[] = [
         repos: [
             ["labelRepo", "labelClass", RepoUtils],
             ["folderRepo", "folderClass", RepoUtils],
+            ["attachmentRepo", "attachmentClass", RepoUtils],
         ],
     },
     {

@@ -7,15 +7,21 @@ import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import { ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, opaqueElement, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
+import { toCompactDateTime } from "../CompactDateTime.js";
 import type { EasCollectionSyncAdapter } from "./EasCollectionSyncAdapter.js";
 import { isGenuineDraft } from "../MessageMoveRules.js";
 import {
+    type Attachment,
     type BlobStore,
+    type ParsedIcsEvent,
     boundIndexedValue,
+    extractIcsFromRaw,
     type Folder,
     type Label,
     type Mailbox,
     type Message,
+    parseInviteIcs,
+    inviteIsAllDay,
     type Recipient,
     FolderType,
     htmlToPlainText,
@@ -44,8 +50,8 @@ const BODY_TYPE_HTML = "2";
 /** MS-ASEMAIL `Flag/Status` value for an active (flagged, not completed) follow-up flag. */
 const FLAG_STATUS_ACTIVE = "2";
 
-/** Max label uids per `in(...)` lookup - well under `RepoUtils.find()`'s 1000-row page cap. */
-const LABEL_LOOKUP_CHUNK = 500;
+/** Max uids per `in(...)` lookup (labels or attachments) - well under `RepoUtils.find()`'s 1000-row page cap. */
+const LOOKUP_CHUNK = 500;
 
 /** The shape of a real entity uid (a lowercase UUID). Anything else in `Message.labelUids` can't be a real label
  * and must never be spliced into an `in(...)` operand, where `me` would resolve to the caller's uid and a comma
@@ -91,7 +97,20 @@ function labelKey(mailboxUid: string, labelUid: string): string {
  * rendering a whole Sync page/search result set use `toApplicationDataBatch()`, which resolves every referenced
  * label with one `in(...)` query per mailbox rather than one per labelled message.
  *
- * `labelClass`/`folderClass` are supplied by the Mongo/SQL concrete subclasses.
+ * Also emits MS-ASAIRSYNCBASE's `Attachments` (every message that has any - `Attachment` rows resolved with one
+ * `in(...)` query per batch, the same pattern `resolveLabelNames()` already uses for labels) and, for a message
+ * whose `meetingMethod` is `"REQUEST"`, MS-ASEMAIL's `MeetingRequest` - the actual mechanism a real EAS client
+ * uses to recognize an invite and offer Accept/Decline, built from the raw message's own `.ics` part via
+ * restapi's `extractIcsFromRaw()`/`parseInviteIcs()` (the same invite-parsing logic the web client's own
+ * Accept/Decline card already relies on, rather than a second, divergent parser). A pragmatic subset, deliberately
+ * not the full MS-ASEMAIL semantics: `BusyStatus`/`Sensitivity` have no source field in an invite's own
+ * iCalendar file, so both use the spec's documented default (the same choice `CalendarSyncAdapter` already makes
+ * for `Sensitivity`); `Recurrences`/`GlobalObjId`/`TimeZone` are not emitted (the same documented gap
+ * `CalendarSyncAdapter` already carries for its own `TimeZone`). An invite whose `.ics` can't be read or has no
+ * `StartTime`/`EndTime` simply renders without a `MeetingRequest` element - the email itself still syncs
+ * normally, just without invite recognition on the device.
+ *
+ * `labelClass`/`folderClass`/`attachmentClass` are supplied by the Mongo/SQL concrete subclasses.
  *
  * @author Jean-Philippe Steinmetz
  */
@@ -102,12 +121,16 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
 
     protected abstract folderClass: any;
 
+    protected abstract attachmentClass: any;
+
     // Automatically injected by ObjectFactory on instantiation
     private _objectFactory?: ObjectFactory;
 
     private labelRepo?: RepoUtils<any>;
 
     private folderRepo?: RepoUtils<any>;
+
+    private attachmentRepo?: RepoUtils<any>;
 
     @Inject("BlobStore")
     private blobStore?: BlobStore;
@@ -123,6 +146,9 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         if (!this.folderRepo && this.folderClass) {
             this.folderRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
         }
+        if (!this.attachmentRepo && this.attachmentClass) {
+            this.attachmentRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.attachmentClass.name, args: [this.attachmentClass] });
+        }
     }
 
     public async toApplicationData(message: Message): Promise<WbxmlElement> {
@@ -130,9 +156,14 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
     }
 
     /** Renders a whole page of messages, resolving every referenced `Label` with one `find()` per distinct
-     * mailbox (in practice one per page) instead of one per labelled message. */
+     * mailbox (in practice one per page) instead of one per labelled message, and likewise batching the
+     * `Attachment`/`MeetingRequest` lookups below rather than doing either per message. */
     public async toApplicationDataBatch(messages: Message[]): Promise<WbxmlElement[]> {
-        const labelNames = await this.resolveLabelNames(messages);
+        const [labelNames, attachmentsByMessage, meetingRequestsByMessage] = await Promise.all([
+            this.resolveLabelNames(messages),
+            this.resolveAttachments(messages),
+            this.resolveMeetingRequests(messages),
+        ]);
         return messages.map((message) => {
             const categories: string[] = [];
             for (const uid of new Set(message.labelUids ?? [])) {
@@ -141,11 +172,60 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                     categories.push(name);
                 }
             }
-            return this.render(message, categories);
+            return this.render(message, categories, attachmentsByMessage.get(message.uid) ?? [], meetingRequestsByMessage.get(message.uid));
         });
     }
 
-    private render(message: Message, categories: string[]): WbxmlElement {
+    /** Resolves every message with `hasAttachments` to its `Attachment` rows, in one `in(...)` query per
+     * `LOOKUP_CHUNK` of message uids rather than one per message - the same batching `resolveLabelNames()` uses. */
+    private async resolveAttachments(messages: Message[]): Promise<Map<string, Attachment[]>> {
+        const byMessage = new Map<string, Attachment[]>();
+        const uids = messages.filter((m) => m.hasAttachments).map((m) => m.uid);
+        if (uids.length === 0 || !this.attachmentRepo) {
+            return byMessage;
+        }
+        for (let i = 0; i < uids.length; i += LOOKUP_CHUNK) {
+            const chunk = uids.slice(i, i + LOOKUP_CHUNK);
+            const rows: Attachment[] = await this.attachmentRepo.find({ messageUid: `in(${chunk.join(",")})`, limit: chunk.length } as any, {
+                ignoreACL: true,
+                limit: chunk.length,
+            });
+            for (const row of rows) {
+                const list = byMessage.get(row.messageUid) ?? [];
+                list.push(row);
+                byMessage.set(row.messageUid, list);
+            }
+        }
+        return byMessage;
+    }
+
+    /** Resolves every `meetingMethod === "REQUEST"` message to a rendered `MeetingRequest` element, fetching and
+     * parsing each one's raw MIME in parallel (bounded by the page's own `windowSize`, same as any other
+     * per-batch work here) rather than serially. A message whose `.ics` can't be read or parsed, or that has no
+     * `StartTime`/`EndTime`, simply has no entry - `render()` then omits the element rather than fail the whole
+     * item (see `SyncCommand.ts`'s own comment on why a render failure must never be lightly reintroduced). */
+    private async resolveMeetingRequests(messages: Message[]): Promise<Map<string, WbxmlElement>> {
+        const byMessage = new Map<string, WbxmlElement>();
+        const candidates = messages.filter((m) => m.meetingMethod === "REQUEST" && m.bodyBlobKey);
+        await Promise.all(
+            candidates.map(async (message) => {
+                try {
+                    const raw = await this.blobStore!.get(message.bodyBlobKey);
+                    const ics = await extractIcsFromRaw(raw);
+                    const parsed: ParsedIcsEvent | undefined = ics ? parseInviteIcs(ics) : undefined;
+                    if (parsed?.startDate && parsed?.endDate) {
+                        byMessage.set(message.uid, meetingRequestElement(parsed));
+                    }
+                } catch {
+                    // Malformed/unreadable .ics: no MeetingRequest for this one message, same tolerant-of-a-bad-
+                    // reference stance as the stale label uids this file already drops silently above.
+                }
+            }),
+        );
+        return byMessage;
+    }
+
+    private render(message: Message, categories: string[], attachments: Attachment[], meetingRequest: WbxmlElement | undefined): WbxmlElement {
         const to = message.recipients.filter((r) => r.type === RecipientType.TO).map((r) => r.address);
         const cc = message.recipients.filter((r) => r.type === RecipientType.CC).map((r) => r.address);
         const bcc = message.recipients.filter((r) => r.type === RecipientType.BCC).map((r) => r.address);
@@ -177,6 +257,8 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                       ),
                   ]
                 : []),
+            ...(attachments.length > 0 ? [attachmentsElement(attachments)] : []),
+            ...(meetingRequest ? [meetingRequest] : []),
         ]);
     }
 
@@ -203,8 +285,8 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         const lookups: Promise<void>[] = [];
         for (const [mailboxUid, uidSet] of uidsByMailbox) {
             const uids = Array.from(uidSet);
-            for (let i = 0; i < uids.length; i += LABEL_LOOKUP_CHUNK) {
-                const chunk = uids.slice(i, i + LABEL_LOOKUP_CHUNK);
+            for (let i = 0; i < uids.length; i += LOOKUP_CHUNK) {
+                const chunk = uids.slice(i, i + LOOKUP_CHUNK);
                 lookups.push(
                     this.labelRepo!.find({ mailboxUid, uid: `in(${chunk.join(",")})`, limit: chunk.length } as any, {
                         ignoreACL: true,
@@ -355,6 +437,45 @@ export function decodeConversationId(opaque: Buffer): string {
 
 function formatAddress(address: string, displayName?: string): string {
     return displayName ? `${displayName} <${address}>` : address;
+}
+
+/** MS-ASAIRSYNCBASE `Attachments`/`Attachment`: `FileReference` is the attachment's own uid, exactly what
+ * `ItemOperationsCommand.fetchAttachment()` already expects to look it up directly via `attachmentRepo.findOne()`.
+ * `Method` is fixed `"1"` (normal attachment) - this adapter never attaches an embedded message or OLE object. */
+function attachmentsElement(attachments: Attachment[]): WbxmlElement {
+    return element(
+        WbxmlCodePage.AirSyncBase,
+        "Attachments",
+        attachments.map((attachment) =>
+            element(WbxmlCodePage.AirSyncBase, "Attachment", [
+                textElement(WbxmlCodePage.AirSyncBase, "DisplayName", attachment.filename),
+                textElement(WbxmlCodePage.AirSyncBase, "FileReference", attachment.uid),
+                textElement(WbxmlCodePage.AirSyncBase, "Method", "1"),
+                textElement(WbxmlCodePage.AirSyncBase, "EstimatedDataSize", String(attachment.sizeBytes)),
+                ...(attachment.contentId ? [textElement(WbxmlCodePage.AirSyncBase, "ContentId", attachment.contentId)] : []),
+                textElement(WbxmlCodePage.AirSyncBase, "IsInline", attachment.isInline ? "1" : "0"),
+            ]),
+        ),
+    );
+}
+
+/** MS-ASEMAIL `MeetingRequest` - see this file's own doc comment for the pragmatic-subset fields this
+ * deliberately omits (`Recurrences`/`GlobalObjId`/`TimeZone`) and why `BusyStatus`/`Sensitivity` are fixed. Only
+ * called once `resolveMeetingRequests()` has already confirmed `parsed.startDate`/`endDate` are both present. */
+function meetingRequestElement(parsed: ParsedIcsEvent): WbxmlElement {
+    return element(WbxmlCodePage.Email, "MeetingRequest", [
+        textElement(WbxmlCodePage.Email, "DtStamp", toCompactDateTime(parsed.dtstamp ?? new Date())),
+        textElement(WbxmlCodePage.Email, "StartTime", toCompactDateTime(parsed.startDate!)),
+        textElement(WbxmlCodePage.Email, "EndTime", toCompactDateTime(parsed.endDate!)),
+        textElement(WbxmlCodePage.Email, "AllDayEvent", inviteIsAllDay(parsed) ? "1" : "0"),
+        ...(parsed.location ? [textElement(WbxmlCodePage.Email, "Location", parsed.location)] : []),
+        ...(parsed.organizer?.address ? [textElement(WbxmlCodePage.Email, "Organizer", parsed.organizer.address)] : []),
+        textElement(WbxmlCodePage.Email, "BusyStatus", "2"),
+        textElement(WbxmlCodePage.Email, "Sensitivity", "0"),
+        textElement(WbxmlCodePage.Email, "InstanceType", parsed.recurrenceRule ? "1" : "0"),
+        textElement(WbxmlCodePage.Email, "ResponseRequested", "1"),
+        textElement(WbxmlCodePage.Email, "DisallowNewTimeProposal", "0"),
+    ]);
 }
 
 /** Parses a `;`/`,`-separated address list (`"Name <a@x.com>; b@y.com"`, or the bare-address-only form this
