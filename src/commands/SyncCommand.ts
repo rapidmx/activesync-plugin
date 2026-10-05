@@ -454,6 +454,33 @@ export abstract class SyncCommand implements EasCommandHandler {
                       include: filterPredicate(collectionClass, working.filterType),
                   });
 
+        // Rendered *before* `saveState()` below persists the round's new watermark/cursor - deliberately. An
+        // `adapter.toApplicationData(Batch)` failure (a malformed item - see e.g. CalendarSyncAdapter's own
+        // defensive fallbacks for why one can still reach this point) must never leave the device's sync state
+        // advanced past items it was never actually sent: once `saveState()` commits, the next round's cursor
+        // starts *after* those items, and a response that never reached the device (because this request died
+        // with an uncaught error) means they silently never sync again - permanently, not just this one retry.
+        // Computing this first makes a render failure abort the whole request before any state changes at all,
+        // so the device's next attempt replays the exact same round against the exact same (still unmoved) cursor.
+        const upserts = commands.filter((c): c is { kind: "Add" | "Change"; item: any } => c.kind !== "Delete");
+        let applicationData: WbxmlElement[];
+        try {
+            applicationData =
+                upserts.length === 0
+                    ? []
+                    : adapter.toApplicationDataBatch
+                      ? await adapter.toApplicationDataBatch(upserts.map((c) => c.item))
+                      : await Promise.all(upserts.map(async (c) => await adapter.toApplicationData(c.item)));
+        } catch (err: any) {
+            // Logged with enough to find the one malformed item directly (collection/folder/uids), since the
+            // state-ordering comment above means this failure is now merely retried, not corrupting - but a
+            // render that keeps failing every retry needs a real trace to fix, not another silent mystery.
+            this.logger?.error(
+                `Sync render failed for ${collectionClass} folderUid=${folderUid} itemUids=${upserts.map((c) => c.item.uid).join(",")}: ${err?.stack ?? err}`,
+            );
+            throw err;
+        }
+
         const newKey = formatSyncKey({ generation: working.generation + 1, watermark: working.cursor.date, uid: working.cursor.uid });
         const saved: boolean = await this.saveState(stored, { loaded: held, ids: working.serverIds }, {
             mailboxUid: ctx.mailboxUid,
@@ -474,14 +501,6 @@ export abstract class SyncCommand implements EasCommandHandler {
         if (!saved) {
             return this.collectionResponse(collectionClass, folderUid, STATUS_INVALID_SYNC_KEY, undefined);
         }
-
-        const upserts = commands.filter((c): c is { kind: "Add" | "Change"; item: any } => c.kind !== "Delete");
-        const applicationData: WbxmlElement[] =
-            upserts.length === 0
-                ? []
-                : adapter.toApplicationDataBatch
-                  ? await adapter.toApplicationDataBatch(upserts.map((c) => c.item))
-                  : await Promise.all(upserts.map(async (c) => await adapter.toApplicationData(c.item)));
         const commandElements: WbxmlElement[] = commands.map((c) =>
             c.kind === "Delete"
                 ? element(WbxmlCodePage.AirSync, "Delete", [textElement(WbxmlCodePage.AirSync, "ServerId", c.uid)])

@@ -121,7 +121,7 @@ async function buildCommand(
         delete: vi.fn().mockResolvedValue(undefined),
         truncate: vi.fn().mockResolvedValue(undefined),
     };
-    const logger = { warn: vi.fn() };
+    const logger = { warn: vi.fn(), error: vi.fn() };
     (command as any).repos = new Map([[collectionClass, repo]]);
     (command as any).adapters = new Map([[collectionClass, adapter]]);
     (command as any).mailboxRepo = { findOne: vi.fn().mockResolvedValue({ uid: "mbx-1", primarySmtpAddress: "owner@example.com", displayName: "Owner" }) };
@@ -444,6 +444,33 @@ describe("SyncCommand Tests (isolated)", () => {
             expect(saved.cursorDate).toEqual(new Date("2026-02-01T00:00:00.000Z"));
             expect(saved.previous).toEqual(expect.objectContaining({ syncKey: STORED_KEY, addedIds: ["new-item"], removedIds: [], clientIds: [] }));
             expect(saved.syncKey).toBe(childText(collection(response!), "SyncKey"));
+        });
+
+        it("Aborts the whole request - without ever saving state - when rendering a server change throws, so a retry replays the identical round against the unmoved cursor.", async () => {
+            const repo = fakeRepo({
+                find: vi.fn().mockImplementation(async (query: any) =>
+                    !query.deleted && query.folderUid === FOLDER_UID
+                        ? [{ uid: "bad-item", folderUid: FOLDER_UID, dateModified: new Date("2026-02-01T00:00:00.000Z") }]
+                        : [],
+                ),
+            });
+            const renderError = new Error("malformed item");
+            const { command, stateRepo, logger } = await buildCommand(
+                "Fake",
+                fakeAdapter({
+                    toApplicationData: () => {
+                        throw renderError;
+                    },
+                }),
+                repo,
+            );
+            const { ctx } = buildContext(syncRequest("Fake", []));
+
+            await expect(command.handle(ctx)).rejects.toThrow("malformed item");
+
+            expect(stateRepo.update).not.toHaveBeenCalled();
+            expect(stateRepo.create).not.toHaveBeenCalled();
+            expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("bad-item"));
         });
 
         it("Accepts the previous SyncKey (a retried round), recomputing from the state before that round.", async () => {

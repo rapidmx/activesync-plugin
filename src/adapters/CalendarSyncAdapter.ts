@@ -109,11 +109,25 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
             textElement(WbxmlCodePage.Calendar, "EndTime", toCompactDateTime(event.endDate)),
             textElement(WbxmlCodePage.Calendar, "AllDayEvent", event.allDay ? "1" : "0"),
             textElement(WbxmlCodePage.Calendar, "DtStamp", toCompactDateTime(event.dateModified)),
-            textElement(WbxmlCodePage.Calendar, "BusyStatus", BUSY_STATUS_CODES[event.busyStatus]),
+            // `?? BUSY_STATUS_CODES[BusyStatus.FREE]` - a defensive fallback, not an expected case: `event.busyStatus`
+            // is typed as the `BusyStatus` enum, but (like `reminderMinutesBeforeStart` above) a row written before
+            // a later enum value existed, or by a path outside this library's own writers, could hold anything.
+            // Per MS-ASCAL's own spec text "0=Free" is its documented default, the same reasoning this file already
+            // uses for `ATTENDEE_STATUS_CODES`'s `NEEDS_ACTION` fallback below. A thrown render error here would -
+            // see `SyncCommand.ts`'s own comment on why the render now runs before `saveState()` - still just fail
+            // this one sync round rather than corrupt the device's cursor, but there is no reason to let a single
+            // malformed field block the whole round when a safe default renders something usable instead.
+            textElement(WbxmlCodePage.Calendar, "BusyStatus", BUSY_STATUS_CODES[event.busyStatus] ?? BUSY_STATUS_CODES[BusyStatus.FREE]),
             textElement(WbxmlCodePage.Calendar, "Sensitivity", "0"),
             textElement(WbxmlCodePage.Calendar, "MeetingStatus", hasAttendees ? "1" : "0"),
-            textElement(WbxmlCodePage.Calendar, "OrganizerEmail", event.organizer.address),
-            ...(event.organizer.displayName
+            // `event.organizer` is typed as a required `Recipient` (`CalendarEventMongo`/`SQL` both default it to
+            // `{ address: "", type: RecipientType.TO }`), but that default is only ever applied by this library's
+            // own entity constructors - a row written some other way (a direct DB write, an older migration) could
+            // still hydrate it `null`/`undefined`, the same "TypeORM hands back `null` for an unset column" hazard
+            // already documented on `reminderMinutesBeforeStart` below. Falls back to an empty organizer rather
+            // than throwing and losing the whole sync round over one malformed item.
+            textElement(WbxmlCodePage.Calendar, "OrganizerEmail", event.organizer?.address ?? ""),
+            ...(event.organizer?.displayName
                 ? [textElement(WbxmlCodePage.Calendar, "OrganizerName", event.organizer.displayName)]
                 : []),
             ...(hasAttendees
@@ -127,8 +141,15 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
                                   ...(attendee.displayName
                                       ? [textElement(WbxmlCodePage.Calendar, "Name", attendee.displayName)]
                                       : []),
-                                  textElement(WbxmlCodePage.Calendar, "AttendeeType", ATTENDEE_TYPE_CODES[attendee.role]),
-                                  textElement(WbxmlCodePage.Calendar, "AttendeeStatus", ATTENDEE_STATUS_CODES[attendee.responseStatus]),
+                                  // Same defensive-fallback reasoning as `BusyStatus` above - a value outside the
+                                  // known enum (rather than missing entirely) falls back to this spec's own
+                                  // documented default instead of rendering `undefined` onto the wire or throwing.
+                                  textElement(WbxmlCodePage.Calendar, "AttendeeType", ATTENDEE_TYPE_CODES[attendee.role] ?? ATTENDEE_TYPE_CODES[AttendeeRole.REQUIRED]),
+                                  textElement(
+                                      WbxmlCodePage.Calendar,
+                                      "AttendeeStatus",
+                                      ATTENDEE_STATUS_CODES[attendee.responseStatus] ?? ATTENDEE_STATUS_CODES[AttendeeResponseStatus.NEEDS_ACTION],
+                                  ),
                               ]),
                           ),
                       ),
