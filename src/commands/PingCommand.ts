@@ -11,7 +11,7 @@ import { childText, element, findChild, findChildren, textElement, type WbxmlEle
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import { compareCursor, cursorOf, isListableUid, scanAfter } from "../EasSyncKeyUtils.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
-const { Config, Init, Inject } = ObjectDecorators;
+const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** MS-ASCMD `Ping` `Status` codes this pragmatic subset distinguishes - not the full enumeration the real
  * spec defines (e.g. it also has a code for "folder hierarchy changed"), matching this library's "pragmatic
@@ -110,6 +110,9 @@ export class PingCommand implements EasCommandHandler {
     @Config("trusted_roles", ["admin"])
     private trustedRoles: string[] = ["admin"];
 
+    @Logger
+    private logger: any;
+
     /** Supplied by the Mongo/SQL subclasses; without them the pending-change check is skipped. */
     protected collectionStateClass?: any;
     protected collectionBindings: Record<string, PingCollectionBinding> = {};
@@ -160,6 +163,16 @@ export class PingCommand implements EasCommandHandler {
                   .map((folderEl) => childText(folderEl, "ServerId"))
                   .filter((uid): uid is string => !!uid)
             : [];
+        // TEMPORARY DIAGNOSTIC LOGGING - investigating a real-device report: Email syncs in the background on
+        // its own, but Calendar/Contacts only update when the user manually triggers a sync, despite all three
+        // being enabled in the device's own account settings. `Ping`'s watched-folder list is entirely
+        // client-supplied (see this class's own doc comment) - this logs exactly which folder uids a real
+        // device's `Ping` actually asks to watch, to see directly whether Calendar/Contacts are ever included
+        // at all, rather than assuming from behavior alone. Not a behavior change - purely observational -
+        // expected to be reverted once the root cause is confirmed.
+        this.logger?.warn(
+            `EAS_DEBUG Ping IN deviceId=${ctx.deviceId} requestedFolderUids=${JSON.stringify(requestedFolderUids)} heartbeatRequested=${childText(ctx.request, "HeartbeatInterval") ?? "<none>"}`,
+        );
         if (requestedFolderUids.length === 0) {
             return this.statusResponse(STATUS_MISSING_PARAMETERS);
         }
@@ -184,6 +197,10 @@ export class PingCommand implements EasCommandHandler {
         );
 
         const changedFolderUids: string[] = await this.waitForChange(ctx, folderUids, heartbeatSeconds);
+        // TEMPORARY DIAGNOSTIC LOGGING - see the matching comment above.
+        this.logger?.warn(
+            `EAS_DEBUG Ping OUT deviceId=${ctx.deviceId} watchedFolderUids=${JSON.stringify(folderUids)} heartbeatSeconds=${heartbeatSeconds} changedFolderUids=${JSON.stringify(changedFolderUids)}`,
+        );
         if (changedFolderUids.length === 0) {
             return this.statusResponse(STATUS_NO_CHANGES);
         }
