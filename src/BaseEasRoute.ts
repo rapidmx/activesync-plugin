@@ -245,19 +245,6 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             request = handler.rawBody ? this.decodeRawBodyRequest(req) : this.decodeRequest(req);
         }
 
-        // TEMPORARY DIAGNOSTIC LOGGING - investigating a real-device report: a message composed on-device (via
-        // Sync Add/Change to Drafts, not SendMail/SmartReply - confirmed by its stored MIME's shape) sometimes
-        // has its Body/Data cut off mid-word in what's actually stored, with no error raised anywhere. Logs the
-        // raw WBXML byte length the server actually received for a Sync request versus the client's own
-        // declared Content-Length, so a mismatch (the server reading less than the device sent) is visible
-        // directly, before chasing the decoder or EmailSyncAdapter itself. Not a behavior change - purely
-        // observational - expected to be reverted once the root cause is confirmed.
-        if (cmd === "Sync") {
-            this.logger?.warn(
-                `EAS_DEBUG Sync IN deviceId=${deviceId} rawBodyBytes=${req.rawBody?.length ?? 0} contentLength=${firstQueryValue(req.headers["content-length"]) ?? "<none>"} transferEncoding=${firstQueryValue(req.headers["transfer-encoding"]) ?? "<none>"}`,
-            );
-        }
-
         const response: WbxmlElement | undefined = await handler.handle({
             user,
             mailboxUid,
