@@ -30,7 +30,7 @@ import {
     MessageImportance,
     RecipientType,
 } from "@rapidmx/restapi";
-const { Init, Inject } = ObjectDecorators;
+const { Init, Inject, Logger } = ObjectDecorators;
 
 /** MS-ASEMAIL `Importance`: 0=Low, 1=Normal, 2=High. */
 const IMPORTANCE_CODES: Record<MessageImportance, string> = {
@@ -160,6 +160,9 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
 
     @Inject("BlobStore")
     private blobStore?: BlobStore;
+
+    @Logger
+    private logger: any;
 
     @Init
     protected async initialize(): Promise<void> {
@@ -458,6 +461,17 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
             // A device composing HTML (Gmail does) sends `Body.Type` 2: the draft keeps its text, not the markup, which its preview and
             // the plain-text MIME built below would otherwise show as literal tags.
             const data = (bodyEl && childText(bodyEl, "Data")) ?? "";
+            // TEMPORARY DIAGNOSTIC LOGGING - investigating a real-device report: a message composed on-device
+            // (via this exact Add/Change path to Drafts) was found, by reading the actually-stored raw MIME
+            // directly off a live server, cut off mid-word - with no error anywhere. Logs what the WBXML decoder
+            // handed this method for `Data` (length, plus a head/tail preview so an abrupt cutoff is visible
+            // directly) before anything here has a chance to touch it, to tell apart "the device/decoder already
+            // delivered a short string" from a bug in this method's own handling of it. Not a behavior change -
+            // purely observational - expected to be reverted once the root cause is confirmed.
+            this.logger?.warn(
+                `EAS_DEBUG EmailSyncAdapter.fromApplicationData Body IN existing=${existing?.uid ?? "<new>"} dataLength=${data.length} ` +
+                    `head=${JSON.stringify(data.slice(0, 60))} tail=${JSON.stringify(data.slice(-60))}`,
+            );
             const text = bodyEl && childText(bodyEl, "Type") === BODY_TYPE_HTML ? htmlToPlainText(data) : data;
             // Always a fresh key, never an overwrite of `existing.bodyBlobKey`: an existing blob may be shared, and
             // leaving it intact means a Change that then fails its version check can't corrupt the stored body.
