@@ -32,6 +32,8 @@ const FOLDER_TYPE_CODES: Record<FolderType, string> = {
     [FolderType.TASKS]: "7",
     [FolderType.CALENDAR]: "8",
     [FolderType.CONTACTS]: "9",
+    // The Suggested Contacts folder is a second address book, so a device lists it as a user-created Contacts folder (14) and syncs it like any other.
+    [FolderType.SUGGESTED_CONTACTS]: "14",
     [FolderType.NOTES]: "10",
     [FolderType.JUNK]: "12",
     // MS-ASCMD's FolderHierarchy Type enumeration has no dedicated "Archive" code - real Exchange either treats

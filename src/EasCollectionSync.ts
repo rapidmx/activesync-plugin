@@ -338,6 +338,7 @@ export function classForFolderType(type: FolderType): string {
         case FolderType.CALENDAR:
             return "Calendar";
         case FolderType.CONTACTS:
+        case FolderType.SUGGESTED_CONTACTS:
             return "Contacts";
         case FolderType.TASKS:
             return "Tasks";

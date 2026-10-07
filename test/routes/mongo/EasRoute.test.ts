@@ -846,6 +846,23 @@ describe("Route:EasRouteMongo Tests", () => {
             expect(childText(findChild(changes, "Add")!, "DisplayName")).toBe("Inbox");
         });
 
+        it("Lists the Suggested Contacts folder to a device as a user-created Contacts folder.", async () => {
+            const mailbox = await createMailbox(owner.uid);
+            await provisionDevice("dev1");
+            const folder = await createFolderWithAcl(mailbox.uid, { name: "Suggested Contacts", type: FolderType.SUGGESTED_CONTACTS });
+
+            const initial = await postWbxml(
+                "FolderSync",
+                "dev1",
+                element(WbxmlCodePage.FolderHierarchy, "FolderSync", [textElement(WbxmlCodePage.FolderHierarchy, "SyncKey", "0")]),
+            );
+
+            const add = findChild(findChild(initial, "Changes")!, "Add")!;
+            expect(childText(add, "ServerId")).toBe(folder.uid);
+            expect(childText(add, "DisplayName")).toBe("Suggested Contacts");
+            expect(childText(add, "Type")).toBe("14");
+        });
+
         it("Reports an existing folder as an Add in the initial response, and not again on the next round.", async () => {
             const mailbox = await createMailbox(owner.uid);
             await provisionDevice("dev1");
