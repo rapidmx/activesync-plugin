@@ -283,6 +283,64 @@ describe("MeetingResponseCommand Tests (isolated)", () => {
         expect(childText(findChild(single!, "Result")!, "CalendarId")).toBe("only-override");
     });
 
+    describe("airsyncbase:InstanceId (one occurrence of a recurring series, protocol 16.0+)", () => {
+        const recurringEvent = (overrides: Record<string, any> = {}) =>
+            event({ recurrenceRule: { freq: 1, interval: 1, exceptions: [] }, ...overrides });
+
+        function replyWithInstance(userResponse: string, requestId: string, instanceId: string): WbxmlElement[] {
+            return [...reply(userResponse, requestId), textElement(WbxmlCodePage.MeetingResponse, "InstanceId", instanceId)];
+        }
+
+        it("Resolves (creating if needed) the targeted occurrence via ensureCalendarOccurrence(), and records the response against that occurrence's own row, not the series master's.", async () => {
+            const calendarEventRepo = {
+                findOne: vi.fn().mockResolvedValue(recurringEvent()),
+                find: vi.fn().mockResolvedValue([]),
+                create: vi.fn().mockResolvedValue({ ...recurringEvent(), uid: "occurrence-1", version: 1, recurrenceId: new Date("2026-03-08T10:00:00.000Z"), recurrenceRule: undefined }),
+                update: vi.fn().mockResolvedValue({}),
+                delete: vi.fn().mockResolvedValue(undefined),
+            };
+            const { command } = build({ calendarEventRepo });
+
+            const response = await command.handle(ctx(request(replyWithInstance("1", "event-1", "20260308T100000Z"))));
+
+            expect(statuses(response)).toEqual(["1"]);
+            expect(calendarEventRepo.create).toHaveBeenCalledTimes(1);
+            expect(calendarEventRepo.update).toHaveBeenCalledTimes(1);
+            expect(calendarEventRepo.update.mock.calls[0][0].uid).toBe("occurrence-1");
+            expect(childText(findChild(response!, "Result")!, "CalendarId")).toBe("occurrence-1");
+        });
+
+        it("Reports Status 3 (without crashing the whole request) when resolving the occurrence fails.", async () => {
+            const calendarEventRepo = {
+                findOne: vi.fn().mockResolvedValue(recurringEvent()),
+                find: vi.fn().mockRejectedValue(new Error("db down")),
+                update: vi.fn(),
+                delete: vi.fn(),
+            };
+            const { command, logger } = build({ calendarEventRepo });
+
+            const response = await command.handle(ctx(request(replyWithInstance("1", "event-1", "20260308T100000Z"))));
+
+            expect(statuses(response)).toEqual(["3"]);
+            expect(calendarEventRepo.update).not.toHaveBeenCalled();
+            expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/failed to resolve InstanceId occurrence/));
+        });
+
+        it("Ignores InstanceId (responds against the whole series) when the event has no Recurrence at all, or is already one occurrence's own row.", async () => {
+            const nonRecurring = { calendarEventRepo: { findOne: vi.fn().mockResolvedValue(event()), find: vi.fn(), update: vi.fn().mockResolvedValue({}), delete: vi.fn() } };
+            const { command: c1 } = build(nonRecurring);
+            expect(statuses(await c1.handle(ctx(request(replyWithInstance("1", "event-1", "20260308T100000Z")))))).toEqual(["1"]);
+            expect(nonRecurring.calendarEventRepo.find).not.toHaveBeenCalled();
+
+            const alreadyInstance = {
+                calendarEventRepo: { findOne: vi.fn().mockResolvedValue(recurringEvent({ recurrenceId: new Date("2026-03-08T10:00:00.000Z") })), find: vi.fn(), update: vi.fn().mockResolvedValue({}), delete: vi.fn() },
+            };
+            const { command: c2 } = build(alreadyInstance);
+            expect(statuses(await c2.handle(ctx(request(replyWithInstance("1", "event-1", "20260308T100000Z")))))).toEqual(["1"]);
+            expect(alreadyInstance.calendarEventRepo.find).not.toHaveBeenCalled();
+        });
+    });
+
     describe("Round 5", () => {
         const inviteMime = (uid: string): Buffer =>
             Buffer.from(

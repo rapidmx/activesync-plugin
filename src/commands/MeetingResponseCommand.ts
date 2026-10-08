@@ -23,7 +23,8 @@ import {
     RecoverableRepoUtils,
     type TransportResult,
 } from "@rapidmx/restapi";
-import { isOrganizedBy } from "../adapters/CalendarSyncAdapter.js";
+import { ensureCalendarOccurrence, isOrganizedBy } from "../adapters/CalendarSyncAdapter.js";
+import { fromCompactDateTime } from "../CompactDateTime.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
@@ -83,6 +84,11 @@ type StoredEvent = CalendarEvent & { uid: string; version: number };
  * Failures are per request: an unknown/unresolvable meeting, a meeting the caller may not respond to, or a
  * malformed `Request` gets Status 2 (indistinguishable, so nothing about other mailboxes leaks); a failed write
  * Status 3.
+ *
+ * **One occurrence of a recurring series** (`InstanceId`, protocol 16.0+): resolved/created via
+ * `CalendarSyncAdapter.ensureCalendarOccurrence()` - the same mechanism `SyncCommand`'s own `InstanceId`
+ * handling uses - so a response to a single occurrence records against (and, for a first response, creates)
+ * that occurrence's own row rather than the whole series.
  *
  * `calendarEventClass`/`mailboxClass`/`messageClass` are supplied by the Mongo/SQL concrete subclasses.
  *
@@ -171,9 +177,22 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
             return this.result(requestId, STATUS_INVALID_REQUEST);
         }
 
-        const event: StoredEvent | undefined = await this.resolveEvent(ctx, requestId);
+        let event: StoredEvent | undefined = await this.resolveEvent(ctx, requestId);
         if (!event || !(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, event.folderUid, ACLAction.UPDATE))) {
             return this.result(requestId, STATUS_INVALID_REQUEST);
+        }
+        // MS-ASAIRS `InstanceId` (protocol 16.0+): this response is to one *occurrence* of the series
+        // `resolveEvent()` found (a device only ever holds the series master's own `RequestId`/`ServerId` for a
+        // recurring meeting - it computes individual occurrences locally), not the whole series - resolved/
+        // created exactly like `CalendarSyncAdapter.changeInstance()`'s own identical `InstanceId` handling.
+        const instanceId = childText(requestEl, "InstanceId");
+        if (instanceId && !event.recurrenceId && event.recurrenceRule) {
+            try {
+                event = await ensureCalendarOccurrence(this.calendarEventRepo!, event, fromCompactDateTime(instanceId));
+            } catch (err: any) {
+                this.logger?.warn(`MeetingResponseCommand: failed to resolve InstanceId occurrence for event ${event.uid}: ${err?.message}`);
+                return this.result(requestId, STATUS_MAILBOX_ERROR);
+            }
         }
 
         const callerAddresses = new Set([mailbox.primarySmtpAddress, ...(mailbox.aliasAddresses ?? [])].map((a) => a.toLowerCase()));

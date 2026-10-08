@@ -993,6 +993,85 @@ describe("SyncCommand Tests (isolated)", () => {
         });
     });
 
+    describe("airsyncbase:InstanceId (one occurrence of a recurring series, protocol 16.0+)", () => {
+        const withInstanceId = (kind: "Change" | "Delete", instanceId = "20260101T120000Z") =>
+            syncRequest("Fake", [
+                element(WbxmlCodePage.AirSync, kind, [
+                    textElement(WbxmlCodePage.AirSync, "ServerId", "item-1"),
+                    textElement(WbxmlCodePage.AirSyncBase, "InstanceId", instanceId),
+                    ...(kind === "Change" ? [element(WbxmlCodePage.AirSync, "ApplicationData", [])] : []),
+                ]),
+            ]);
+
+        it("Change: delegates to the adapter's changeInstance() instead of the whole-item update, when InstanceId is present.", async () => {
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
+            const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) });
+            const changeInstance = vi.fn().mockResolvedValue(undefined);
+            const { command } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({}), changeInstance }), repo);
+
+            const response = await command.handle(buildContext(withInstanceId("Change")).ctx);
+
+            expect(findChild(collection(response!), "Responses")).toBeUndefined();
+            expect(changeInstance).toHaveBeenCalledWith(existing, "20260101T120000Z", expect.objectContaining({ tag: "ApplicationData" }), repo, expect.anything());
+            expect(repo.update).not.toHaveBeenCalled();
+        });
+
+        it("Change: reports Status 6 when the adapter has no changeInstance(), Status 7 on a version conflict, and Status 6 on any other changeInstance() failure.", async () => {
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
+
+            const { command: noHandler } = await buildCommand(
+                "Fake",
+                fakeAdapter({ fromApplicationData: () => ({}) }),
+                fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) }),
+            );
+            expect(responseStatus(await noHandler.handle(buildContext(withInstanceId("Change")).ctx), "Change")).toBe("6");
+
+            const { command: conflict } = await buildCommand(
+                "Fake",
+                fakeAdapter({
+                    fromApplicationData: () => ({}),
+                    changeInstance: vi.fn().mockRejectedValue(new ApiError(ApiErrors.INVALID_OBJECT_VERSION, 409, "Version conflict")),
+                }),
+                fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) }),
+            );
+            expect(responseStatus(await conflict.handle(buildContext(withInstanceId("Change")).ctx), "Change")).toBe("7");
+
+            const { command: broken } = await buildCommand(
+                "Fake",
+                fakeAdapter({ fromApplicationData: () => ({}), changeInstance: vi.fn().mockRejectedValue(new Error("db error")) }),
+                fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) }),
+            );
+            expect(responseStatus(await broken.handle(buildContext(withInstanceId("Change")).ctx), "Change")).toBe("6");
+        });
+
+        it("Delete: delegates to the adapter's deleteInstance() instead of the whole-item delete, when InstanceId is present.", async () => {
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
+            const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) });
+            const deleteInstance = vi.fn().mockResolvedValue(undefined);
+            const { command } = await buildCommand("Fake", fakeAdapter({ deleteInstance }), repo);
+
+            const response = await command.handle(buildContext(withInstanceId("Delete")).ctx);
+
+            expect(findChild(collection(response!), "Responses")).toBeUndefined();
+            expect(deleteInstance).toHaveBeenCalledWith(existing, "20260101T120000Z", repo);
+            expect(repo.delete).not.toHaveBeenCalled();
+        });
+
+        it("Delete: reports Status 6 when the adapter has no deleteInstance(), and Status 6 on any deleteInstance() failure.", async () => {
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
+
+            const { command: noHandler } = await buildCommand("Fake", fakeAdapter(), fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) }));
+            expect(responseStatus(await noHandler.handle(buildContext(withInstanceId("Delete")).ctx), "Delete")).toBe("6");
+
+            const { command: broken } = await buildCommand(
+                "Fake",
+                fakeAdapter({ deleteInstance: vi.fn().mockRejectedValue(new Error("db error")) }),
+                fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) }),
+            );
+            expect(responseStatus(await broken.handle(buildContext(withInstanceId("Delete")).ctx), "Delete")).toBe("6");
+        });
+    });
+
     describe("Delete", () => {
         it("Deletes a non-Email item silently and forgets it.", async () => {
             const repo = fakeRepo({

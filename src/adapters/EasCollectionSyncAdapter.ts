@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import type { RecoverableBaseEntity } from "@rapidrest/service-core";
+import type { RecoverableBaseEntity, RepoUtils } from "@rapidrest/service-core";
 import type { Mailbox } from "@rapidmx/restapi";
 import type { WbxmlElement } from "../codec/WbxmlElement.js";
 
@@ -91,4 +91,31 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
      * ignore the `mailbox` parameter entirely).
      */
     newEntityDefaults?(mailbox: Mailbox): Partial<T>;
+
+    /**
+     * Applies a client-originated `Change` targeting one *occurrence* of a recurring series (MS-ASAIRSYNCBASE
+     * `InstanceId`, protocol 16.0+) rather than the whole series `master` resolved to. `instanceId` is that
+     * occurrence's original start, as the device sent it (MS-ASDTYPE Compact DateTime). Implementations own
+     * the entire write themselves (creating the occurrence's own override row via `repo` the first time it's
+     * individually modified, or updating it on a later edit) - `SyncCommand` has no concept of what an
+     * "occurrence" is beyond this hook. Optional: `SyncCommand` reports Status 6 for an `InstanceId` `Change`
+     * when the collection's own adapter doesn't implement this (every adapter but `CalendarSyncAdapter` today -
+     * `Email`/`Contacts`/`Tasks` have no recurring-series concept at all).
+     *
+     * @param master The recurring series' own item, as `SyncCommand` already resolved the device's `ServerId` to.
+     * @param instanceId The targeted occurrence's original start.
+     * @param appData The command's `<ApplicationData>` element - the occurrence's own new field values.
+     * @param repo The collection's own repo, for the create-or-update this performs directly.
+     * @param mailbox The mailbox that owns `master`.
+     */
+    changeInstance?(master: T, instanceId: string, appData: WbxmlElement, repo: RepoUtils<T>, mailbox: Mailbox): Promise<void>;
+
+    /**
+     * Applies a client-originated `Delete` targeting one *occurrence* of a recurring series (MS-ASAIRSYNCBASE
+     * `InstanceId`, protocol 16.0+) - cancels that occurrence (removing its own override row if `changeInstance`
+     * already created one, or else recording it in the series' own exception list) rather than `SyncCommand`'s
+     * own generic whole-row delete, which would destroy the entire series. See `changeInstance`'s own doc
+     * comment for `master`/`instanceId`; optional the same way, same fallback (Status 6) when absent.
+     */
+    deleteInstance?(master: T, instanceId: string, repo: RepoUtils<T>): Promise<void>;
 }

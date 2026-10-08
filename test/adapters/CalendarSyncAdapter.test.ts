@@ -409,6 +409,100 @@ describe("CalendarSyncAdapter Tests", () => {
             expect(localDayAndMonth(new Date("2026-07-04T12:00:00.000Z"), "UTC")).toEqual({ day: 4, month: 7 });
         });
     });
+
+    describe("airsyncbase:InstanceId (changeInstance/deleteInstance - one occurrence of a recurring series, protocol 16.0+)", () => {
+        function fakeRepo(overrides: Record<string, any> = {}): any {
+            return {
+                find: vi.fn().mockResolvedValue([]),
+                create: vi.fn().mockImplementation(async (row: any) => ({ uid: "occurrence-1", version: 1, ...row })),
+                update: vi.fn().mockImplementation(async (row: any) => ({ ...row })),
+                delete: vi.fn().mockResolvedValue(undefined),
+                ...overrides,
+            };
+        }
+
+        function recurringMaster(): any {
+            return {
+                ...baseEvent(),
+                mailboxUid: "mbx-1",
+                icalUid: "series@example.com",
+                folderUid: "folder-1",
+                recurrenceRule: { freq: RecurrenceFrequency.WEEKLY, interval: 1, exceptions: [] },
+            };
+        }
+
+        describe("changeInstance", () => {
+            it("Creates the occurrence's own override row (a copy of the master, minus identity fields, no Recurrence of its own) the first time it's edited, then applies the Change's own fields on top.", async () => {
+                const master = recurringMaster();
+                const repo = fakeRepo();
+
+                await adapter.changeInstance(master, "20260108T100000Z", appData([cal("Subject", "Moved standup")]), repo, { primarySmtpAddress: "me@example.com", aliasAddresses: [] } as any);
+
+                expect(repo.find).toHaveBeenCalled();
+                expect(repo.create).toHaveBeenCalledTimes(1);
+                const created = repo.create.mock.calls[0][0];
+                expect(created.uid).toBeUndefined();
+                expect(created.icalUid).toBe("series@example.com");
+                expect(created.mailboxUid).toBe("mbx-1");
+                expect(created.recurrenceId).toEqual(new Date("2026-01-08T10:00:00.000Z"));
+                expect(created.recurrenceRule).toBeUndefined();
+                // Everything the Change didn't send is carried over from the master (ghosted).
+                expect(created.location).toBe("Room 1");
+                expect(repo.update).toHaveBeenCalledTimes(1);
+                expect(repo.update.mock.calls[0][0]).toMatchObject({ uid: "occurrence-1", title: "Moved standup" });
+            });
+
+            it("Updates the existing override row directly on a later edit of the same occurrence, without creating another.", async () => {
+                const master = recurringMaster();
+                const recurrenceId = new Date("2026-01-08T10:00:00.000Z");
+                const override = { ...master, uid: "override-1", version: 2, recurrenceId, recurrenceRule: undefined, title: "Already moved" };
+                const repo = fakeRepo({ find: vi.fn().mockResolvedValue([override]) });
+
+                await adapter.changeInstance(master, "20260108T100000Z", appData([cal("Location", "Room 9")]), repo, { primarySmtpAddress: "me@example.com", aliasAddresses: [] } as any);
+
+                expect(repo.create).not.toHaveBeenCalled();
+                expect(repo.update).toHaveBeenCalledTimes(1);
+                expect(repo.update.mock.calls[0][0]).toMatchObject({ uid: "override-1", version: 2, location: "Room 9" });
+            });
+        });
+
+        describe("deleteInstance", () => {
+            it("Deletes the occurrence's own override row directly when one already exists, without touching the master's own exceptions.", async () => {
+                const master = recurringMaster();
+                const recurrenceId = new Date("2026-01-08T10:00:00.000Z");
+                const override = { ...master, uid: "override-1", version: 2, recurrenceId, recurrenceRule: undefined };
+                const repo = fakeRepo({ find: vi.fn().mockResolvedValue([override]) });
+
+                await adapter.deleteInstance(master, "20260108T100000Z", repo);
+
+                expect(repo.delete).toHaveBeenCalledWith("override-1", { ignoreACL: true });
+                expect(repo.update).not.toHaveBeenCalled();
+            });
+
+            it("Records the occurrence in the series' own exceptions when it was never individually edited.", async () => {
+                const master = recurringMaster();
+                const repo = fakeRepo();
+
+                await adapter.deleteInstance(master, "20260108T100000Z", repo);
+
+                expect(repo.delete).not.toHaveBeenCalled();
+                expect(repo.update).toHaveBeenCalledTimes(1);
+                const [patch] = repo.update.mock.calls[0];
+                expect(patch.uid).toBe(master.uid);
+                expect(patch.recurrenceRule.exceptions).toEqual([new Date("2026-01-08T10:00:00.000Z")]);
+            });
+
+            it("Appends to any exceptions the series already has, rather than replacing them.", async () => {
+                const master = { ...recurringMaster(), recurrenceRule: { freq: RecurrenceFrequency.WEEKLY, interval: 1, exceptions: [new Date("2026-01-01T10:00:00.000Z")] } };
+                const repo = fakeRepo();
+
+                await adapter.deleteInstance(master, "20260108T100000Z", repo);
+
+                const [patch] = repo.update.mock.calls[0];
+                expect(patch.recurrenceRule.exceptions).toEqual([new Date("2026-01-01T10:00:00.000Z"), new Date("2026-01-08T10:00:00.000Z")]);
+            });
+        });
+    });
 });
 
 function baseEvent(): any {

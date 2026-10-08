@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import * as crypto from "crypto";
+import { ModelUtils, type RepoUtils } from "@rapidrest/service-core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { fromCompactDateTime, toCompactDateTime } from "../CompactDateTime.js";
 import type { EasCollectionSyncAdapter } from "./EasCollectionSyncAdapter.js";
 import { isPlainAddress, safeDisplayName } from "../MimeHeaderUtils.js";
 import {
+    asEntity,
     AttendeeResponseStatus,
     AttendeeRole,
     boundIndexedValue,
@@ -91,8 +93,12 @@ const RECURRENCE_FREQUENCY_FROM_CODE = invert(RECURRENCE_TYPE_CODES);
  * its own to source a real value from.
  * - Recurrence patterns keyed by an ordinal weekday (MS-ASCAL `Type` 3/6, e.g. "the 2nd Tuesday of the month")
  * are not emitted - see `RECURRENCE_TYPE_CODES`'s own doc comment.
- * - Recurrence exceptions (individually modified/cancelled occurrences of a recurring series) are not synced to the
- * device; a device `Change` of the recurrence keeps the series' existing exceptions rather than wiping them.
+ * - Recurrence exceptions (individually modified/cancelled occurrences of a recurring series) are not synced in the
+ * *series'* own `Recurrence` element - a device `Change` of the recurrence keeps the series' existing exceptions
+ * rather than wiping them. A single occurrence is instead targeted directly via `airsyncbase:InstanceId` on a
+ * `Sync` `Change`/`Delete` (protocol 16.0+ - see `changeInstance`/`deleteInstance`), the actual MS-ASAIRS
+ * mechanism a real device (confirmed live) uses for "edit/delete just this occurrence" - which is the only
+ * reason this now needs `RepoUtils`/`asEntity`/`ModelUtils` at all.
  *
  * @author Jean-Philippe Steinmetz
  */
@@ -321,6 +327,45 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
         return { icalUid: boundIndexedValue(`${crypto.randomUUID()}@eas`), sequence: 0 };
     }
 
+    /**
+     * MS-ASAIRS `InstanceId` on a `Sync` `Change`: edits one occurrence of `master`'s recurring series via
+     * `ensureCalendarOccurrence()` (shared with `MeetingResponseCommand`'s own identical `InstanceId` handling -
+     * see that function's own doc comment for exactly how the occurrence's own row is found or created), then
+     * applies `appData` to it the same way a whole-series `Change` applies to the series itself - `existing` is
+     * the occurrence's own row either way, so `fromApplicationData`'s ghosting ("unset means unchanged") already
+     * does the right thing with no special-casing here.
+     */
+    public async changeInstance(master: CalendarEvent, instanceId: string, appData: WbxmlElement, repo: RepoUtils<CalendarEvent>, mailbox: Mailbox): Promise<void> {
+        const occurrence = await ensureCalendarOccurrence(repo, master, fromCompactDateTime(instanceId));
+        const partial = this.fromApplicationData(appData, occurrence, mailbox);
+        await repo.update({ uid: occurrence.uid, version: occurrence.version, ...partial }, asEntity(repo, occurrence), { ignoreACL: true });
+    }
+
+    /**
+     * MS-ASAIRS `InstanceId` on a `Sync` `Delete`: cancels one occurrence of `master`'s recurring series rather
+     * than the whole series. An occurrence already individually modified (`changeInstance` created its own
+     * override row) has that row deleted directly; one never touched is instead recorded in the series' own
+     * `recurrenceRule.exceptions` (`CalendarSyncAdapter.toApplicationData()`/`recurrenceElement()` never emits
+     * `Exceptions` to the device - MS-ASCAL's own `Recurrence` has no such child, EAS drops a cancelled
+     * occurrence purely by the device never resolving a `ServerId` for it again, the same mechanism a real
+     * Exchange server uses). Uses `findCalendarOccurrence()` directly, not `ensureCalendarOccurrence()` - a
+     * never-touched occurrence being deleted has no reason to first create a row just to delete it again.
+     */
+    public async deleteInstance(master: CalendarEvent, instanceId: string, repo: RepoUtils<CalendarEvent>): Promise<void> {
+        const recurrenceId = fromCompactDateTime(instanceId);
+        const override = await findCalendarOccurrence(repo, master, recurrenceId);
+        if (override) {
+            await repo.delete(override.uid, { ignoreACL: true });
+            return;
+        }
+        const exceptions = [...(master.recurrenceRule?.exceptions ?? []), recurrenceId];
+        await repo.update(
+            { uid: master.uid, version: master.version, recurrenceRule: { ...master.recurrenceRule!, exceptions } },
+            asEntity(repo, master),
+            { ignoreACL: true },
+        );
+    }
+
     private attendeeFromElement(el: WbxmlElement, existingAttendees: Attendee[] = []): Attendee {
         const address = childText(el, "Email");
         if (!address) {
@@ -395,6 +440,32 @@ export function isOrganizedBy(event: CalendarEvent, mailbox: Mailbox): boolean {
         return true;
     }
     return [mailbox.primarySmtpAddress, ...(mailbox.aliasAddresses ?? [])].some((address) => address.toLowerCase() === organizer);
+}
+
+/** Finds `master`'s own override row (if any) for the occurrence starting at `recurrenceId` - MS-ASAIRS
+ * `InstanceId`'s target, shared between `CalendarSyncAdapter.deleteInstance()` and `MeetingResponseCommand`'s
+ * own identical `InstanceId` handling. Queried by `mailboxUid`/`icalUid` only (no backend indexes or supports
+ * exact-`Date` equality in a query, confirmed against this repo's own `recurrenceIdsMatch()` precedent in
+ * restapi's `ScanQueueJob`, which takes the same two-step approach), then matched in memory by `getTime()` to
+ * dodge any Mongo/SQL date-representation inconsistency a DB-level predicate would risk. */
+export async function findCalendarOccurrence(repo: RepoUtils<CalendarEvent>, master: CalendarEvent, recurrenceId: Date): Promise<CalendarEvent | undefined> {
+    const rows: CalendarEvent[] = await repo.find({ mailboxUid: master.mailboxUid, icalUid: ModelUtils.literal(master.icalUid), limit: 50 } as any, { ignoreACL: true, limit: 50 });
+    return rows.find((row) => row.recurrenceId && new Date(row.recurrenceId).getTime() === recurrenceId.getTime());
+}
+
+/** `findCalendarOccurrence()`, creating the occurrence's own override row when none exists yet - a full copy
+ * of `master`'s own current fields (every field but its identity/bookkeeping ones: `uid`/`dateCreated`/
+ * `dateModified`/`version`/`deleted`), sharing `master`'s `icalUid`, `recurrenceId` set to the occurrence's
+ * own start, and no `Recurrence` of its own since the series still owns the pattern. Used wherever an
+ * `InstanceId`-targeted write needs *a* row for this occurrence to act on, whether or not the device (or, for
+ * `MeetingResponseCommand`, the caller's own response) has touched it before. */
+export async function ensureCalendarOccurrence(repo: RepoUtils<CalendarEvent>, master: CalendarEvent, recurrenceId: Date): Promise<CalendarEvent> {
+    const existing = await findCalendarOccurrence(repo, master, recurrenceId);
+    if (existing) {
+        return existing;
+    }
+    const { uid: _uid, dateCreated: _dateCreated, dateModified: _dateModified, version: _version, deleted: _deleted, ...base } = master as any;
+    return repo.create({ ...base, recurrenceId, recurrenceRule: undefined }, { ignoreACL: true });
 }
 
 /** Normalizes a value for comparison - `null` (SQL) and `undefined` (Mongo) mean the same "unset". */

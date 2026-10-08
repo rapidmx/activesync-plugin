@@ -765,6 +765,26 @@ export abstract class SyncCommand implements EasCommandHandler {
         if (!appData) {
             return this.statusResponseElement("Change", serverId, "6");
         }
+        // airsyncbase:InstanceId (MS-ASAIRS, protocol 16.0+): this Change targets one occurrence of `existing`'s
+        // recurring series, not the series itself - delegated entirely to the adapter (only CalendarSyncAdapter
+        // implements it today), which owns creating/updating that occurrence's own override row. A collection
+        // whose adapter has no such concept reports Status 6, the same "can't apply" fallback already used above
+        // when `fromApplicationData` itself is missing.
+        const instanceId = childText(el, "InstanceId");
+        if (instanceId) {
+            if (!adapter.changeInstance) {
+                return this.statusResponseElement("Change", serverId, "6");
+            }
+            try {
+                await adapter.changeInstance(existing, instanceId, appData, repo, await round.getFolderMailbox());
+                return undefined;
+            } catch (err: any) {
+                if (err instanceof ApiError && err.code === ApiErrors.INVALID_OBJECT_VERSION) {
+                    return this.statusResponseElement("Change", serverId, "7");
+                }
+                return this.statusResponseElement("Change", serverId, "6");
+            }
+        }
         try {
             const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox());
             const updated = await repo.update({ uid: existing.uid, version: existing.version, ...partial }, asEntity(repo, existing), { ignoreACL: true });
@@ -795,6 +815,21 @@ export abstract class SyncCommand implements EasCommandHandler {
         }
         if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folder.uid, ACLAction.DELETE))) {
             return this.statusResponseElement("Delete", serverId, "6");
+        }
+        // airsyncbase:InstanceId (MS-ASAIRS, protocol 16.0+): cancels one occurrence of `existing`'s recurring
+        // series rather than the whole series - see `applyChange`'s identical comment. Checked before the
+        // live-send-lease guard below, which is Email-specific and meaningless for a Calendar occurrence.
+        const instanceId = childText(el, "InstanceId");
+        if (instanceId) {
+            if (!adapter.deleteInstance) {
+                return this.statusResponseElement("Delete", serverId, "6");
+            }
+            try {
+                await adapter.deleteInstance(existing, instanceId, repo);
+                return undefined;
+            } catch {
+                return this.statusResponseElement("Delete", serverId, "6");
+            }
         }
         // Like restapi's delete (409), never while a send of the message is in flight - a moved or deleted message could
         // miss its relay marker and be sent again.
