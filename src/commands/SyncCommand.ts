@@ -58,6 +58,14 @@ export const MAX_SYNC_COLLECTIONS = 300;
  * with that collection's Status 4, without applying any of them. */
 export const MAX_SYNC_COMMANDS_PER_COLLECTION = 512;
 
+/** [MS-ASCMD] `Sync` `Commands` child element names this library actually handles. `SoftDelete` (a client
+ * telling the server about an item it already removed outside of `Sync`) is the one other client-originated
+ * child the spec defines - not implemented, and deliberately not silently accepted as a no-op `Delete` either,
+ * since a soft-deleted item generally still needs the same ACL/lease checks `applyDelete` already does. Kept
+ * as a `Set`, not inlined into the dispatch ternary below, so both the dispatch and the unrecognized-tag log
+ * stay in sync with exactly one list to update when a new child is added. */
+const KNOWN_SYNC_COMMANDS = new Set(["Add", "Change", "Delete", "Fetch"]);
+
 /** Rows read per round from the stream of items outside a collection's folder (see `enumerateCollection`). */
 const DEFAULT_MOVE_SCAN_LIMIT = 1000;
 
@@ -428,6 +436,17 @@ export abstract class SyncCommand implements EasCommandHandler {
         const responseEntries: WbxmlElement[] = [];
         if (commandsEl) {
             for (const el of commandsEl.children) {
+                if (!KNOWN_SYNC_COMMANDS.has(el.tag)) {
+                    // Silently dropping an unrecognized `Commands` child is exactly how this library missed
+                    // `Fetch` for a long time, with no error and no log anywhere pointing at it - a real device
+                    // (Apple Mail) used it as its *only* way to fetch a message body, and every such request
+                    // simply vanished. This can't safely start answering an unknown tag with an error Status -
+                    // a client-tolerated quirk this library hasn't catalogued could regress - but it logs now,
+                    // so the next protocol gap shaped like that one shows up here instead of staying invisible
+                    // until a real device reports a symptom with no server-side trace to chase.
+                    this.logger?.warn(`SyncCommand: ignoring unrecognized Commands child '${el.tag}' for collection ${round.folder.uid}.`);
+                    continue;
+                }
                 const response =
                     el.tag === "Add"
                         ? await this.applyAdd(round, el)
@@ -435,9 +454,7 @@ export abstract class SyncCommand implements EasCommandHandler {
                           ? await this.applyChange(round, el)
                           : el.tag === "Delete"
                             ? await this.applyDelete(round, el)
-                            : el.tag === "Fetch"
-                              ? await this.applyFetch(round, el, bodyPreference)
-                              : undefined;
+                            : await this.applyFetch(round, el, bodyPreference);
                 if (response) {
                     responseEntries.push(response);
                 }

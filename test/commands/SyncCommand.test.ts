@@ -580,10 +580,11 @@ describe("SyncCommand Tests (isolated)", () => {
             expect(limits).toEqual([3, 3, 5, 5, 5, 5]);
         });
 
-        it("Ignores a command element it doesn't know.", async () => {
-            const { command } = await buildCommand("Fake", fakeAdapter(), fakeRepo());
-            const response = await command.handle(buildContext(syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Fetch", [])])).ctx);
+        it("Ignores a command element it doesn't know (e.g. SoftDelete, not implemented), logging it rather than silently dropping it with no trace - the exact gap that hid the Fetch element for a long time.", async () => {
+            const { command, logger } = await buildCommand("Fake", fakeAdapter(), fakeRepo());
+            const response = await command.handle(buildContext(syncRequest("Fake", [element(WbxmlCodePage.AirSync, "SoftDelete", [])])).ctx);
             expect(findChild(collection(response!), "Responses")).toBeUndefined();
+            expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("ignoring unrecognized Commands child 'SoftDelete'"));
         });
 
         it("Parses Options/BodyPreference and passes it to the adapter's render call, so an adapter that cares (EmailSyncAdapter) can honour it - undefined when the device sent none.", async () => {
