@@ -48,6 +48,7 @@ const IMPORTANCE_BY_CODE: Record<string, MessageImportance> = {
 /** MS-ASAIRSYNCBASE `Body.Type`: 1 = plain text, 2 = HTML, 3 = RTF, 4 = MIME. */
 const BODY_TYPE_PLAIN_TEXT = "1";
 const BODY_TYPE_HTML = "2";
+const BODY_TYPE_MIME = "4";
 
 /**
  * MS-OXCMAIL/MS-OXOCAL `MessageClass` for a meeting-invite email, keyed by its iTIP `METHOD`
@@ -272,13 +273,20 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         if (!bodyPreference) {
             return byMessage;
         }
+        const wantsMime = bodyPreference.type === BODY_TYPE_MIME;
         const wantsHtml = bodyPreference.type === BODY_TYPE_HTML;
         await Promise.all(
             messages.map(async (message) => {
                 try {
                     let type = BODY_TYPE_PLAIN_TEXT;
                     let text: string;
-                    if (wantsHtml && message.sanitizedHtmlBlobKey) {
+                    // `Type 4` (raw MIME) is an explicit request for the verbatim source - same preference
+                    // `ItemOperationsCommand.fetchMessage()` already honors - checked first, ahead of the
+                    // HTML-over-plain-text preference below, since it's the device's own direct ask.
+                    if (wantsMime) {
+                        type = BODY_TYPE_MIME;
+                        text = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
+                    } else if (wantsHtml && message.sanitizedHtmlBlobKey) {
                         type = BODY_TYPE_HTML;
                         text = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
                     } else {
@@ -334,6 +342,15 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                 textElement(WbxmlCodePage.AirSyncBase, "Truncated", body ? (body.truncated ? "1" : "0") : "1"),
                 textElement(WbxmlCodePage.AirSyncBase, "Data", body?.data ?? message.bodyPreview),
             ]),
+            // MS-ASAIRS `NativeBodyType` - a sibling of `Body` under `ApplicationData`, spec-optional but
+            // mirrors the `Type` just emitted above (the codec already had this token defined; no adapter ever
+            // emitted it). Added investigating a real device (Apple Mail/iPadOS) that showed every message as
+            // undownloadable despite an otherwise valid, correctly-sized `Body` - a real-world EAS server
+            // implementation (not this one) was found to emit this unconditionally for exactly that reason.
+            // Valid values are only 1 (plain)/2 (HTML)/3 (RTF) - never `body.type`'s own "4" (MIME is the
+            // wrapper around a native body, not a native format itself), so a `Type 4` Fetch response falls
+            // back to this message's real native format instead.
+            textElement(WbxmlCodePage.AirSyncBase, "NativeBodyType", body?.type !== BODY_TYPE_MIME ? (body?.type ?? BODY_TYPE_PLAIN_TEXT) : message.sanitizedHtmlBlobKey ? BODY_TYPE_HTML : BODY_TYPE_PLAIN_TEXT),
             ...(message.conversationId ? [opaqueElement(WbxmlCodePage.Email2, "ConversationId", encodeConversationId(message.conversationId))] : []),
             ...(categories.length > 0
                 ? [

@@ -435,7 +435,9 @@ export abstract class SyncCommand implements EasCommandHandler {
                           ? await this.applyChange(round, el)
                           : el.tag === "Delete"
                             ? await this.applyDelete(round, el)
-                            : undefined;
+                            : el.tag === "Fetch"
+                              ? await this.applyFetch(round, el, bodyPreference)
+                              : undefined;
                 if (response) {
                     responseEntries.push(response);
                 }
@@ -641,11 +643,53 @@ export abstract class SyncCommand implements EasCommandHandler {
         ]);
     }
 
-    private statusResponseElement(kind: "Change" | "Delete", serverId: string, status: string): WbxmlElement {
+    private statusResponseElement(kind: "Change" | "Delete" | "Fetch", serverId: string, status: string): WbxmlElement {
         return element(WbxmlCodePage.AirSync, kind, [
             textElement(WbxmlCodePage.AirSync, "ServerId", serverId),
             textElement(WbxmlCodePage.AirSync, "Status", status),
         ]);
+    }
+
+    /**
+     * Handles `Sync`'s own `Commands/Fetch` (MS-ASCMD) - a *separate* mechanism from the standalone
+     * `ItemOperations` command's `Fetch`, requesting one item's full `ApplicationData` (honoring the
+     * collection's own `Options/BodyPreference`, including `Type 4` for raw MIME) inline in the next `Sync`
+     * response instead of a second round trip. Discovered live: a real device (Apple Mail/iPadOS) uses
+     * exclusively *this* mechanism to fetch a message body, never `ItemOperations` - which this library had
+     * never implemented, silently dropping every such request with no error and no response, matching exactly
+     * what that device showed ("message cannot be downloaded"). Reuses the same `adapter.toApplicationData()`
+     * already used for `Add`/`Change`, so attachments/`MeetingRequest`/`NativeBodyType`/categories all render
+     * identically here too, rather than a second, divergent renderer the way `ItemOperationsCommand` has its
+     * own.
+     */
+    private async applyFetch(round: CollectionRound, el: WbxmlElement, bodyPreference: SyncBodyPreference | undefined): Promise<WbxmlElement | undefined> {
+        const { adapter, repo, folder } = round;
+        const serverId = childText(el, "ServerId");
+        if (!serverId) {
+            return undefined;
+        }
+        const existing = await repo.findOne(serverId, { ignoreACL: true });
+        // An item outside this collection is reported identically to "doesn't exist", same stance
+        // `applyChange`/`applyDelete` already take. No separate READ check here: `handleCollection()`'s own
+        // gate (above, before any command in this `Collection` runs at all) already requires READ on this
+        // exact `folder.uid`, and `existing.folderUid === folder.uid` is confirmed right above - a second,
+        // identical check here would be unreachable dead code, not defense in depth.
+        if (!existing || existing.folderUid !== folder.uid) {
+            return this.statusResponseElement("Fetch", serverId, "8");
+        }
+        try {
+            const applicationData = await adapter.toApplicationData(existing, bodyPreference);
+            return element(WbxmlCodePage.AirSync, "Fetch", [
+                textElement(WbxmlCodePage.AirSync, "ServerId", serverId),
+                textElement(WbxmlCodePage.AirSync, "Status", "1"),
+                applicationData,
+            ]);
+        } catch {
+            // Status 6: "the client has sent a malformed or invalid item" - the same fallback `applyAdd` uses,
+            // since a render failure here is this one item's problem, not the whole Sync round's (unlike the
+            // Add/Change batch render above, nothing here has already advanced this round's own cursor).
+            return this.statusResponseElement("Fetch", serverId, "6");
+        }
     }
 
     /** Remembers the `dateModified` the device's own write left on `item`, so the write isn't echoed back. */

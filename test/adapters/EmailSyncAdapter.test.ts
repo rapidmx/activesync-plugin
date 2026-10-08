@@ -676,6 +676,27 @@ describe("EmailSyncAdapter Tests", () => {
                 expect(fieldOf(body, "Data")).toBe("<p>Sanitized HTML body</p>");
             });
 
+            it("Sends the verbatim raw MIME source when the device asks for Type 4, the same explicit-raw-source preference ItemOperationsCommand.fetchMessage() already honours - the mechanism Sync's own embedded Commands/Fetch (not ItemOperations) uses for a real device's (Apple Mail) full-body fetch.", async () => {
+                const { adapter, get } = buildAdapter();
+                const rawMime = "Subject: X\r\nFrom: a@x.com\r\n\r\nRaw MIME body, verbatim.";
+                get.mockResolvedValue(Buffer.from(rawMime, "utf-8"));
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, bodyBlobKey: "bodies/raw-1", sanitizedHtmlBlobKey: "sanitized/x" }], { type: "4" });
+                expect(get).toHaveBeenCalledWith("bodies/raw-1");
+                const body = rendered.children.find((c) => c.tag === "Body")!;
+                expect(fieldOf(body, "Type")).toBe("4");
+                expect(fieldOf(body, "Data")).toBe(rawMime);
+                // NativeBodyType is never "4" (MIME is the wrapper, not a native body format) - it falls back to
+                // this message's real native format, HTML here since a sanitized HTML blob exists.
+                expect(fieldOf(rendered, "NativeBodyType")).toBe("2");
+            });
+
+            it("Falls back NativeBodyType to plain text (not HTML) for a Type 4 fetch when the message has no sanitized HTML body at all.", async () => {
+                const { adapter, get } = buildAdapter();
+                get.mockResolvedValue(Buffer.from("Subject: X\r\n\r\nRaw MIME, plain-text message.", "utf-8"));
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, bodyBlobKey: "bodies/raw-2", sanitizedHtmlBlobKey: undefined }], { type: "4" });
+                expect(fieldOf(rendered, "NativeBodyType")).toBe("1");
+            });
+
             it("Truncates to the requested TruncationSize and marks Truncated 1, reporting the pre-truncation EstimatedDataSize - the same truncateUtf8() ItemOperationsCommand.fetchMessage() already uses, shared rather than reimplemented.", async () => {
                 const { adapter, get } = buildAdapter();
                 get.mockResolvedValue(Buffer.from("Subject: X\r\n\r\n0123456789", "utf-8"));

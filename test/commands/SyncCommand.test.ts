@@ -942,6 +942,57 @@ describe("SyncCommand Tests (isolated)", () => {
         });
     });
 
+    describe("Fetch", () => {
+        it("Renders the item's full ApplicationData (honouring BodyPreference) inline in Responses, with Status 1 - the mechanism a real device (Apple Mail) uses to fetch a message body, instead of ItemOperations.", async () => {
+            const existing = { uid: "item-1", folderUid: FOLDER_UID };
+            const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) });
+            const render = vi.fn().mockResolvedValue(element(WbxmlCodePage.AirSync, "ApplicationData", [textElement(WbxmlCodePage.Email, "Subject", "Hi")]));
+            const { command } = await buildCommand("Fake", fakeAdapter({ toApplicationData: render }), repo);
+            const bodyPreferenceOptions = element(WbxmlCodePage.AirSync, "Options", [
+                element(WbxmlCodePage.AirSyncBase, "BodyPreference", [textElement(WbxmlCodePage.AirSyncBase, "Type", "4")]),
+            ]);
+            const request = syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Fetch", [textElement(WbxmlCodePage.AirSync, "ServerId", "item-1")])], [bodyPreferenceOptions]);
+
+            const response = await command.handle(buildContext(request).ctx);
+
+            const fetchResponse = findChild(findChild(collection(response!), "Responses")!, "Fetch")!;
+            expect(childText(fetchResponse, "ServerId")).toBe("item-1");
+            expect(childText(fetchResponse, "Status")).toBe("1");
+            expect(childText(findChild(fetchResponse, "ApplicationData")!, "Subject")).toBe("Hi");
+            expect(render).toHaveBeenCalledWith(existing, { type: "4", truncationSize: undefined });
+        });
+
+        it("Reports Status 8 when ServerId doesn't resolve (or resolves outside this collection), and Status 6 when the adapter's render throws - and ignores a Fetch with no ServerId at all. No separate per-item READ check: handleCollection()'s own gate already requires READ on this exact folder before any command in it runs.", async () => {
+            const fetch = (serverId?: string) =>
+                syncRequest("Fake", [element(WbxmlCodePage.AirSync, "Fetch", serverId ? [textElement(WbxmlCodePage.AirSync, "ServerId", serverId)] : [])]);
+
+            const { command: notFound } = await buildCommand("Fake", fakeAdapter(), fakeRepo({ findOne: vi.fn().mockResolvedValue(undefined) }));
+            expect(responseStatus(await notFound.handle(buildContext(fetch("missing-1")).ctx), "Fetch")).toBe("8");
+
+            const outsideCollection = fakeRepo({ findOne: vi.fn().mockResolvedValue({ uid: "item-1", folderUid: "someone-elses-folder" }) });
+            const { command: outside } = await buildCommand("Fake", fakeAdapter(), outsideCollection);
+            expect(responseStatus(await outside.handle(buildContext(fetch("item-1")).ctx), "Fetch")).toBe("8");
+
+            const brokenRepo = fakeRepo({ findOne: vi.fn().mockResolvedValue({ uid: "item-1", folderUid: FOLDER_UID }) });
+            const { command: broken } = await buildCommand(
+                "Fake",
+                fakeAdapter({
+                    toApplicationData: () => {
+                        throw new Error("render failed");
+                    },
+                }),
+                brokenRepo,
+            );
+            expect(responseStatus(await broken.handle(buildContext(fetch("item-1")).ctx), "Fetch")).toBe("6");
+
+            const ignoredRepo = fakeRepo();
+            const { command: ignored } = await buildCommand("Fake", fakeAdapter(), ignoredRepo);
+            const ignoredResponse = await ignored.handle(buildContext(fetch()).ctx);
+            expect(findChild(collection(ignoredResponse!), "Responses")).toBeUndefined();
+            expect(ignoredRepo.findOne).not.toHaveBeenCalled();
+        });
+    });
+
     describe("Delete", () => {
         it("Deletes a non-Email item silently and forgets it.", async () => {
             const repo = fakeRepo({
