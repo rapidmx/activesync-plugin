@@ -659,14 +659,17 @@ describe("Route:EasRouteMongo Tests", () => {
                 ]),
             );
             expect(childText(wipeDirective, "Status")).toBe("1");
-            expect(childText(findChild(wipeDirective, "RemoteWipe")!, "Status")).toBe("1");
+            // `accountOnly: true` above - MS-ASPROV's AccountOnlyRemoteWipe wire directive, not the full-device
+            // RemoteWipe, is what the device must actually receive.
+            expect(findChild(wipeDirective, "RemoteWipe")).toBeUndefined();
+            expect(childText(findChild(wipeDirective, "AccountOnlyRemoteWipe")!, "Status")).toBe("1");
             expect(findChild(wipeDirective, "Policies")).toBeUndefined();
 
             const wipeAck = await postWbxml(
                 "Provision",
                 "dev1",
                 element(WbxmlCodePage.Provision, "Provision", [
-                    element(WbxmlCodePage.Provision, "RemoteWipe", [
+                    element(WbxmlCodePage.Provision, "AccountOnlyRemoteWipe", [
                         textElement(WbxmlCodePage.Provision, "Status", "1"),
                     ]),
                 ]),

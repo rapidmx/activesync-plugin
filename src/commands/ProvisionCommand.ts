@@ -49,9 +49,11 @@ const STATUS_DEVICE_BLOCKED = "129";
  * flag (`BaseDeviceSyncStateRoute.unblock`). Otherwise a device (or whoever holds it) could acknowledge the wipe
  * without wiping anything and simply provision again. The block (like the wipe itself) is keyed on the client-supplied
  * `DeviceId`: a client that ignores the directive can pair again under another `DeviceId` with the same credentials -
- * see `DeviceSyncState.blocked`; revoking the account's credentials is what stops that. `remoteWipeAccountOnly` is recorded for admin audit only; the wire directive sent to the
- * device is identical either way (a real "wipe just this account's data" vs. "wipe the whole device"
- * distinction would require an MDM-capable client extension this library doesn't implement).
+ * see `DeviceSyncState.blocked`; revoking the account's credentials is what stops that. `remoteWipeAccountOnly`
+ * (an admin's "wipe just this account" choice, `BaseDeviceSyncStateRoute.remoteWipe`) picks MS-ASPROV's
+ * `AccountOnlyRemoteWipe` wire directive over the full-device `RemoteWipe` - a real, normal 16.0+ element, not
+ * something needing an MDM-capable client extension; the acknowledgement is detected the same way either way
+ * (an empty `Provision` request wrapping whichever tag the directive sent).
  *
  * @author Jean-Philippe Steinmetz
  */
@@ -77,16 +79,24 @@ export class ProvisionCommand implements EasCommandHandler {
         if (ctx.deviceSyncState.blocked) {
             return element(WbxmlCodePage.Provision, "Provision", [textElement(WbxmlCodePage.Provision, "Status", STATUS_DEVICE_BLOCKED)]);
         }
-        if (ctx.request && findChild(ctx.request, "RemoteWipe")) {
+        // MS-ASPROV's `AccountOnlyRemoteWipe` (protocol 16.0+) is a *different* wrapper tag from `RemoteWipe` -
+        // an empty-Provision-element acknowledgement echoes back whichever one the directive below actually
+        // sent, so both are checked here, not just `RemoteWipe`.
+        if (ctx.request && (findChild(ctx.request, "RemoteWipe") || findChild(ctx.request, "AccountOnlyRemoteWipe"))) {
             return await this.acknowledgeRemoteWipe(ctx);
         }
 
         // While a wipe is pending, no Provision request - neither a fresh policy request nor an acknowledgement of a
         // key issued before the wipe was requested - may (re)provision the device: every one gets the directive.
+        // `remoteWipeAccountOnly` (an admin's "wipe just this account" choice, `BaseDeviceSyncStateRoute.remoteWipe`)
+        // picks `AccountOnlyRemoteWipe` over the full-device `RemoteWipe` - previously recorded but never actually
+        // wired to a different wire directive, so every wipe reached the device as a full-device wipe regardless
+        // of what the admin chose.
         if (ctx.deviceSyncState.remoteWipeRequested) {
+            const directive = ctx.deviceSyncState.remoteWipeAccountOnly ? "AccountOnlyRemoteWipe" : "RemoteWipe";
             return element(WbxmlCodePage.Provision, "Provision", [
                 textElement(WbxmlCodePage.Provision, "Status", "1"),
-                element(WbxmlCodePage.Provision, "RemoteWipe", [textElement(WbxmlCodePage.Provision, "Status", "1")]),
+                element(WbxmlCodePage.Provision, directive, [textElement(WbxmlCodePage.Provision, "Status", "1")]),
             ]);
         }
 
@@ -188,11 +198,8 @@ export class ProvisionCommand implements EasCommandHandler {
         clientPolicyKey: string,
         clientStatus: string | undefined,
     ): Promise<WbxmlElement> {
-        if (
-            !ctx.deviceSyncState.policyKey ||
-            !timingSafeEqualStrings(clientPolicyKey, ctx.deviceSyncState.policyKey) ||
-            clientStatus !== "1"
-        ) {
+        const keysMatch: boolean = !!ctx.deviceSyncState.policyKey && timingSafeEqualStrings(clientPolicyKey, ctx.deviceSyncState.policyKey);
+        if (!keysMatch || clientStatus !== "1") {
             // Status 2 ("protocol error" per MS-ASPROV) - an approximation, not a byte-exact enumeration of
             // every real status code MS-ASPROV defines; this pragmatic subset only distinguishes success from
             // "something is wrong, start over" (see this class's own doc comment on scope), and deliberately

@@ -107,6 +107,33 @@ describe("ProvisionCommand Tests", () => {
         expect(update).not.toHaveBeenCalled();
     });
 
+    it("Sends AccountOnlyRemoteWipe instead of RemoteWipe when the pending wipe was requested as account-only, and acknowledges it the same way.", async () => {
+        const command = new ProvisionCommand();
+        const ctx = makeContext({
+            request: undefined,
+            deviceSyncState: { uid: "dss-1", version: 1, policyKey: undefined, provisioned: false, remoteWipeRequested: true, remoteWipeAccountOnly: true } as any,
+        });
+
+        const response = await command.handle(ctx);
+
+        expect(childText(response!, "Status")).toBe("1");
+        expect(findChild(response!, "RemoteWipe")).toBeUndefined();
+        const accountOnly = findChild(response!, "AccountOnlyRemoteWipe")!;
+        expect(childText(accountOnly, "Status")).toBe("1");
+
+        const update = vi.fn().mockResolvedValue(undefined);
+        const ackCtx = makeContext({
+            deviceSyncState: { uid: "dss-1", version: 1, remoteWipeRequested: true, remoteWipeAccountOnly: true } as any,
+            deviceSyncStateRepo: { update } as any,
+            request: element(WbxmlCodePage.Provision, "Provision", [
+                element(WbxmlCodePage.Provision, "AccountOnlyRemoteWipe", [textElement(WbxmlCodePage.Provision, "Status", "1")]),
+            ]),
+        });
+        const ackResponse = await command.handle(ackCtx);
+        expect(childText(ackResponse!, "Status")).toBe("1");
+        expect(update.mock.calls[0][0]).toMatchObject({ remoteWipeRequested: false, blocked: true });
+    });
+
     it("Rejects phase 2 acknowledgement when the client's own Policy Status is not 1, without provisioning.", async () => {
         const command = new ProvisionCommand();
         const ctx = makeContext({
