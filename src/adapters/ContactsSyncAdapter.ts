@@ -126,8 +126,16 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
      * `categories` is ghosted as its own whole group (same rule as `emails`/`phones`/`addresses`): an absent
      * `Categories` element leaves `Contact.categories` untouched, while a present one - even `<Categories/>`
      * with no `Category` children - rebuilds it from scratch (an empty array clears it).
+     *
+     * **Phones specifically** also preserve any existing phone of a kind EAS has no tag for at all (see
+     * `PHONE_TAG`'s own doc comment - `OTHER`, today) across a rebuild: a real device's Contacts edit UI only
+     * ever sends `HomePhoneNumber`/`BusinessPhoneNumber`, so rebuilding the group from just those two (as every
+     * other ghosted group here rebuilds from exactly what's present) would silently delete a phone number this
+     * protocol simply has no way to round-trip, on the next edit of *any* phone field - discovered live via a
+     * spec audit, not a hypothetical. `existing` is `undefined` only for client-originated `Add`, where there's
+     * nothing to carry forward yet.
      */
-    public fromApplicationData(el: WbxmlElement): Partial<Contact> {
+    public fromApplicationData(el: WbxmlElement, existing?: Contact): Partial<Contact> {
         const partial: Partial<Contact> = {};
 
         const fileAs = childText(el, "FileAs");
@@ -149,9 +157,14 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
 
         const phoneEntries = Object.entries(PHONE_TAG) as [ContactAddressKind, string][];
         if (phoneEntries.some(([, tag]) => findChild(el, tag))) {
-            partial.phones = phoneEntries
-                .map(([type, tag]) => ({ type, phoneNumber: childText(el, tag) }))
-                .filter((phone): phone is { type: ContactAddressKind; phoneNumber: string } => !!phone.phoneNumber);
+            const taggedKinds = new Set(phoneEntries.map(([kind]) => kind));
+            const preserved = (existing?.phones ?? []).filter((phone) => !taggedKinds.has(phone.type));
+            partial.phones = [
+                ...preserved,
+                ...phoneEntries
+                    .map(([type, tag]) => ({ type, phoneNumber: childText(el, tag) }))
+                    .filter((phone): phone is { type: ContactAddressKind; phoneNumber: string } => !!phone.phoneNumber),
+            ];
         }
 
         const addressKinds = Object.values(ContactAddressKind);

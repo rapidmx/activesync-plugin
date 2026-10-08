@@ -178,6 +178,30 @@ describe("ContactsSyncAdapter Tests", () => {
             ]);
         });
 
+        it("Preserves an existing OTHER-kind phone (EAS has no tag for it) across a Home/Business rebuild, instead of silently deleting it.", () => {
+            const existing: Contact = { ...baseContact, phones: [{ type: ContactAddressKind.OTHER, phoneNumber: "555-9999" }] };
+            const el = appData([textElement(WbxmlCodePage.Contacts, "HomePhoneNumber", "555-1111")]);
+            expect(adapter.fromApplicationData(el, existing).phones).toEqual([
+                { type: ContactAddressKind.OTHER, phoneNumber: "555-9999" },
+                { type: ContactAddressKind.HOME, phoneNumber: "555-1111" },
+            ]);
+        });
+
+        it("Replaces (not duplicates) an existing Home/Business phone when the device resends that same slot.", () => {
+            const existing: Contact = {
+                ...baseContact,
+                phones: [
+                    { type: ContactAddressKind.HOME, phoneNumber: "555-0000" },
+                    { type: ContactAddressKind.OTHER, phoneNumber: "555-9999" },
+                ],
+            };
+            const el = appData([textElement(WbxmlCodePage.Contacts, "HomePhoneNumber", "555-1111")]);
+            expect(adapter.fromApplicationData(el, existing).phones).toEqual([
+                { type: ContactAddressKind.OTHER, phoneNumber: "555-9999" },
+                { type: ContactAddressKind.HOME, phoneNumber: "555-1111" },
+            ]);
+        });
+
         it("Leaves addresses untouched when no address tag of any kind is present.", () => {
             const el = appData([textElement(WbxmlCodePage.Contacts, "FileAs", "X")]);
             expect(adapter.fromApplicationData(el).addresses).toBeUndefined();
