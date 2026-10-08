@@ -119,6 +119,23 @@ describe("SearchCommand Tests", () => {
         expect(findChildren(store, "Result").map((result) => childText(result, "ServerId"))).toEqual(["m3", "m1", "m4"]);
     });
 
+    it("Mailbox: renders a page holding a meeting invite with the caller's protocol version and mailbox time zone.", async () => {
+        const messages = [{ uid: "invite", folderUid: "f1", mailboxUid: "mbx-1", meetingMethod: "REQUEST" }];
+        const findOne = vi.fn().mockResolvedValue({ uid: "mbx-1", timezone: "Europe/Berlin" });
+        const toApplicationDataBatch = vi.fn(async (page: any[]) => page.map(() => element(WbxmlCodePage.AirSync, "ApplicationData", [])));
+        const command = buildCommand({
+            messageRepo: { find: vi.fn().mockResolvedValue(messages) },
+            mailboxRepo: { findOne },
+            emailAdapter: { toApplicationDataBatch },
+            searchProvider: { search: vi.fn().mockResolvedValue({ results: [{ entityType: "message", entityUid: "invite", score: 1 }] }) },
+        });
+
+        await command.handle({ user: { uid: "user-1" }, mailboxUid: "mbx-1", protocolVersion: "14.1", request: mailboxRequest("x") } as unknown as EasCommandContext);
+
+        expect(findOne).toHaveBeenCalledWith("mbx-1", { ignoreACL: true });
+        expect(toApplicationDataBatch).toHaveBeenCalledWith(messages, undefined, { protocolVersion: "14.1", mailboxTimezone: "Europe/Berlin" });
+    });
+
     it("Mailbox: records one MESSAGE_CONTENT_ACCESSED entry per other owner's mailbox among the returned results.", async () => {
         const messages = [
             { uid: "own", folderUid: "f1", mailboxUid: "mbx-1" },

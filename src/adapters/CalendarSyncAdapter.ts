@@ -7,8 +7,10 @@ import { ModelUtils, type RepoUtils } from "@rapidrest/service-core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { fromCompactDateTime, toCompactDateTime } from "../CompactDateTime.js";
-import type { EasCollectionSyncAdapter } from "./EasCollectionSyncAdapter.js";
+import { isProtocol16OrLater } from "../EasCommandHandler.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "./EasCollectionSyncAdapter.js";
 import { isPlainAddress, safeDisplayName } from "../MimeHeaderUtils.js";
+import { allDayDateToLocalMidnight, allDayInstantToDate, decodeTimeZone, encodeTimeZone } from "../TimeZoneInfo.js";
 import {
     asEntity,
     AttendeeResponseStatus,
@@ -19,6 +21,7 @@ import {
     type RecurrenceRule,
     RecurrenceFrequency,
     RecipientType,
+    resolveTimeZone,
     type Attendee,
     type Mailbox,
 } from "@rapidmx/restapi";
@@ -84,11 +87,18 @@ const RECURRENCE_FREQUENCY_FROM_CODE = invert(RECURRENCE_TYPE_CODES);
 /**
  * Maps `CalendarEvent` to/from the EAS `Sync` `Calendar` collection class (MS-ASCAL).
  *
+ * **Time zones** (`Timezone`, the base64 Win32 structure - see `TimeZoneInfo.ts`): every timed event carries its own
+ * zone (`CalendarEvent.timezone`, else the mailbox's, else UTC), which is what lets a device expand a recurring series
+ * at the right wall-clock time across daylight saving changes and on the right local weekday; `StartTime`/`EndTime`
+ * stay absolute UTC instants. A device's `Timezone` on `Add`/`Change` is decoded back to an IANA zone and stored.
+ *
+ * **All-day events** are stored as the UTC midnights of their dates (restapi's convention, which recurrence expansion
+ * relies on), and go over the wire per the client's protocol version (MS-ASCAL `AllDayEvent`): from 16.0 with no
+ * `Timezone` and date-only `StartTime`/`EndTime`/`Until` (time 00:00:00Z), which the device shows on those dates
+ * whatever zone it is in; before 16.0 as the instants the dates' local midnights fall at in the event's zone, beside
+ * that zone's `Timezone`. Either form the device sends back is read to the same stored dates (`allDayInstantToDate()`).
+ *
  * **Pragmatic subset, deliberately not the full MS-ASCAL semantics**:
- * - `TimeZone` is not emitted - the real element is a base64-encoded binary Win32 `TIME_ZONE_INFORMATION`
- * structure, not a plain IANA string; `CalendarEvent.timezone` (an IANA identifier) can't be losslessly
- * re-encoded into that format without a full IANA-to-Windows zone mapping table, and a real device would
- * rather see no `TimeZone` element (falling back to its own default) than a malformed one.
  * - `Sensitivity` is always reported `0` (Normal) - this library's `CalendarEvent` has no privacy dimension of
  * its own to source a real value from.
  * - Recurrence patterns keyed by an ordinal weekday (MS-ASCAL `Type` 3/6, e.g. "the 2nd Tuesday of the month")
@@ -105,14 +115,25 @@ const RECURRENCE_FREQUENCY_FROM_CODE = invert(RECURRENCE_TYPE_CODES);
 export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEvent> {
     public readonly collectionClass = "Calendar";
 
-    public toApplicationData(event: CalendarEvent): WbxmlElement {
+    public toApplicationData(event: CalendarEvent, _bodyPreference?: SyncBodyPreference, render?: SyncRenderContext): WbxmlElement {
         const hasAttendees = event.attendees.length > 0;
+        const zone: string = resolveTimeZone(event.timezone) ?? resolveTimeZone(render?.mailboxTimezone) ?? "UTC";
+        // See this class's doc comment: an all-day event is floating dates from 16.0, local midnights before it.
+        const floating: boolean = event.allDay && isProtocol16OrLater(render?.protocolVersion);
+        const wireTime = (value: Date | string): Date => {
+            if (!event.allDay) {
+                return new Date(value);
+            }
+            const date = allDayInstantToDate(new Date(value), zone);
+            return floating ? date : allDayDateToLocalMidnight(date, zone);
+        };
 
         return element(WbxmlCodePage.AirSync, "ApplicationData", [
+            ...(floating ? [] : [textElement(WbxmlCodePage.Calendar, "Timezone", encodeTimeZone(zone, new Date(event.startDate)))]),
             textElement(WbxmlCodePage.Calendar, "Subject", event.title),
             ...(event.location ? [textElement(WbxmlCodePage.Calendar, "Location", event.location)] : []),
-            textElement(WbxmlCodePage.Calendar, "StartTime", toCompactDateTime(event.startDate)),
-            textElement(WbxmlCodePage.Calendar, "EndTime", toCompactDateTime(event.endDate)),
+            textElement(WbxmlCodePage.Calendar, "StartTime", toCompactDateTime(wireTime(event.startDate))),
+            textElement(WbxmlCodePage.Calendar, "EndTime", toCompactDateTime(wireTime(event.endDate))),
             textElement(WbxmlCodePage.Calendar, "AllDayEvent", event.allDay ? "1" : "0"),
             textElement(WbxmlCodePage.Calendar, "DtStamp", toCompactDateTime(event.dateModified)),
             // `?? BUSY_STATUS_CODES[BusyStatus.FREE]` - a defensive fallback, not an expected case: `event.busyStatus`
@@ -168,15 +189,19 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
             ...(event.reminderMinutesBeforeStart != null
                 ? [textElement(WbxmlCodePage.Calendar, "Reminder", String(event.reminderMinutesBeforeStart))]
                 : []),
-            ...(event.recurrenceRule ? [this.recurrenceElement(event.recurrenceRule, event.startDate, event.timezone)] : []),
+            ...(event.recurrenceRule
+                ? [this.recurrenceElement(event.recurrenceRule, new Date(event.startDate), event.allDay ? "UTC" : zone, wireTime)]
+                : []),
         ]);
     }
 
-    private recurrenceElement(rule: RecurrenceRule, startDate: Date, timezone: string): WbxmlElement {
+    /** `dayZone` is the zone the start date's day and month are read in - the event's own for a timed event, UTC for an
+     * all-day one (whose stored dates are UTC midnights). `untilOnWire` puts `Until` in the same form as `StartTime`. */
+    private recurrenceElement(rule: RecurrenceRule, startDate: Date, dayZone: string, untilOnWire: (until: Date | string) => Date): WbxmlElement {
         const dayOfWeekBits = (rule.byDay ?? []).reduce((sum, day) => sum + (DAY_OF_WEEK_BITS[day] ?? 0), 0);
         // A rule without an explicit day/month recurs on the start date's day/month *as the event's own timezone
         // sees it* - an evening event east of UTC falls on the previous UTC day.
-        const local = localDayAndMonth(startDate, timezone);
+        const local = localDayAndMonth(startDate, dayZone);
 
         return element(WbxmlCodePage.Calendar, "Recurrence", [
             textElement(WbxmlCodePage.Calendar, "Type", RECURRENCE_TYPE_CODES[rule.freq]),
@@ -190,16 +215,16 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
             ...(rule.freq === RecurrenceFrequency.YEARLY
                 ? [textElement(WbxmlCodePage.Calendar, "MonthOfYear", String(rule.byMonth?.[0] ?? local.month))]
                 : []),
-            ...(rule.until ? [textElement(WbxmlCodePage.Calendar, "Until", toCompactDateTime(rule.until))] : []),
+            ...(rule.until ? [textElement(WbxmlCodePage.Calendar, "Until", toCompactDateTime(untilOnWire(rule.until)))] : []),
             // See the identical `!= null` reasoning on `reminderMinutesBeforeStart` above.
             ...(rule.count != null ? [textElement(WbxmlCodePage.Calendar, "Occurrences", String(rule.count))] : []),
         ]);
     }
 
     /**
-     * Reverse of `toApplicationData`. `timezone`/`status`/`icalUid` have no wire representation at all and are
-     * never included in the returned partial - `newEntityDefaults()` supplies `icalUid`/`sequence` for a brand new
-     * event, and a `Change` merges onto `existing`.
+     * Reverse of `toApplicationData`. `status`/`icalUid` have no wire representation at all and are never included in
+     * the returned partial - `newEntityDefaults()` supplies `icalUid`/`sequence` for a brand new event, and a `Change`
+     * merges onto `existing`. `timezone` and all-day dates: see `applyTimeZone()`.
      *
      * **Organizer** (`mailbox` = the caller's own mailbox, supplied by `SyncCommand`): a device can only create an
      * event organized by itself - on an `Add`, an `OrganizerEmail` that isn't one of the mailbox's own addresses (or
@@ -295,6 +320,8 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
             };
         }
 
+        this.applyTimeZone(el, partial, existing, mailbox);
+
         if (existing && mailbox && !isOrganizedBy(existing, mailbox)) {
             // An attendee's copy: the attendee can't reschedule the organizer's meeting for everyone, so the sequence
             // stays put, and the copy is marked as already invited at it so MeetingSchedulingJob never mails a REQUEST
@@ -307,6 +334,44 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
         }
 
         return partial;
+    }
+
+    /**
+     * The zone and all-day dates of a device's `Add`/`Change` (see this class's doc comment). A `Timezone` is decoded to
+     * an IANA zone, preferring the event's current zone and then the mailbox's when they describe the same rules; one
+     * that can't be decoded leaves the zone as it was. A new event without one (an all-day event from 16.0, which carries
+     * none) gets the mailbox's zone. An all-day event's `StartTime`/`EndTime`/`Until` - date-only from 16.0, local
+     * midnights before it - are stored as the UTC midnights of their dates, read in that zone. An `AllDayEvent` change sent
+     * without new times keeps the stored ones: a device sends them together.
+     */
+    private applyTimeZone(el: WbxmlElement, partial: Partial<CalendarEvent>, existing: CalendarEvent | undefined, mailbox: Mailbox | undefined): void {
+        const timezoneValue = childText(el, "Timezone");
+        if (timezoneValue !== undefined) {
+            const reference: Date = partial.startDate ?? (existing ? new Date(existing.startDate) : new Date());
+            const decoded = decodeTimeZone(timezoneValue, reference, [existing?.timezone, mailbox?.timezone]);
+            if (decoded) {
+                partial.timezone = decoded;
+            }
+        }
+        if (!existing && partial.timezone === undefined) {
+            const mailboxZone = resolveTimeZone(mailbox?.timezone);
+            if (mailboxZone) {
+                partial.timezone = mailboxZone;
+            }
+        }
+        if (!(partial.allDay ?? existing?.allDay)) {
+            return;
+        }
+        const zone: string | undefined = partial.timezone ?? existing?.timezone ?? mailbox?.timezone;
+        if (partial.startDate) {
+            partial.startDate = allDayInstantToDate(partial.startDate, zone);
+        }
+        if (partial.endDate) {
+            partial.endDate = allDayInstantToDate(partial.endDate, zone);
+        }
+        if (partial.recurrenceRule?.until) {
+            partial.recurrenceRule.until = allDayInstantToDate(new Date(partial.recurrenceRule.until), zone);
+        }
     }
 
     /** Stamps `cancelNoticeSentAt` on an attendee's copy of a meeting before it is deleted, so the deletion is never

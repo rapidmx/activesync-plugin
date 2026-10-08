@@ -41,7 +41,7 @@ import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../Mess
 import { EasCollectionLease, type LeaseRelease } from "../EasCollectionLease.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
-import type { EasCollectionSyncAdapter, SyncBodyPreference } from "../adapters/EasCollectionSyncAdapter.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "../adapters/EasCollectionSyncAdapter.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
@@ -268,6 +268,22 @@ export abstract class SyncCommand implements EasCommandHandler {
     }
 
     /** Resolves a mailbox at most once per request, and only if actually needed. */
+    /** What an adapter's rendering needs beyond the item (`SyncRenderContext`): the client's protocol version, and the
+     * zone of the mailbox owning the synced folder. A mailbox that can no longer be read just contributes no zone -
+     * rendering then falls back to each item's own, or UTC - rather than failing the round. */
+    private async renderContext(round: CollectionRound, items: { meetingMethod?: string }[]): Promise<SyncRenderContext> {
+        let mailboxTimezone: string | undefined;
+        // Only Calendar items and Email meeting invites render a zone - no mailbox lookup for anything else.
+        if (round.collectionClass === "Calendar" || (round.collectionClass === "Email" && items.some((item) => item.meetingMethod === "REQUEST"))) {
+            try {
+                mailboxTimezone = (await round.getFolderMailbox()).timezone;
+            } catch {
+                mailboxTimezone = undefined;
+            }
+        }
+        return { protocolVersion: round.ctx.protocolVersion, mailboxTimezone };
+    }
+
     private mailboxLoader(mailboxUid: string): () => Promise<Mailbox> {
         let cached: Mailbox | undefined;
         return async () => {
@@ -485,12 +501,13 @@ export abstract class SyncCommand implements EasCommandHandler {
         const upserts = commands.filter((c): c is { kind: "Add" | "Change"; item: any } => c.kind !== "Delete");
         let applicationData: WbxmlElement[];
         try {
+            const render: SyncRenderContext | undefined = upserts.length === 0 ? undefined : await this.renderContext(round, upserts.map((c) => c.item));
             applicationData =
                 upserts.length === 0
                     ? []
                     : adapter.toApplicationDataBatch
-                      ? await adapter.toApplicationDataBatch(upserts.map((c) => c.item), bodyPreference)
-                      : await Promise.all(upserts.map(async (c) => await adapter.toApplicationData(c.item, bodyPreference)));
+                      ? await adapter.toApplicationDataBatch(upserts.map((c) => c.item), bodyPreference, render)
+                      : await Promise.all(upserts.map(async (c) => await adapter.toApplicationData(c.item, bodyPreference, render)));
         } catch (err: any) {
             // Logged with enough to find the one malformed item directly (collection/folder/uids), since the
             // state-ordering comment above means this failure is now merely retried, not corrupting - but a
@@ -695,7 +712,7 @@ export abstract class SyncCommand implements EasCommandHandler {
             return this.statusResponseElement("Fetch", serverId, "8");
         }
         try {
-            const applicationData = await adapter.toApplicationData(existing, bodyPreference);
+            const applicationData = await adapter.toApplicationData(existing, bodyPreference, await this.renderContext(round, [existing]));
             return element(WbxmlCodePage.AirSync, "Fetch", [
                 textElement(WbxmlCodePage.AirSync, "ServerId", serverId),
                 textElement(WbxmlCodePage.AirSync, "Status", "1"),

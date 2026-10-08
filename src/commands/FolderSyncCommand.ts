@@ -32,6 +32,8 @@ const FOLDER_TYPE_CODES: Record<FolderType, string> = {
     [FolderType.TASKS]: "7",
     [FolderType.CALENDAR]: "8",
     [FolderType.CONTACTS]: "9",
+    // A second, server-filled contacts folder beside the default one: MS-ASCMD's "user-created contacts folder" (14).
+    [FolderType.SUGGESTED_CONTACTS]: "14",
     [FolderType.NOTES]: "10",
     [FolderType.JUNK]: "12",
     // MS-ASCMD's FolderHierarchy Type enumeration has no dedicated "Archive" code - real Exchange either treats

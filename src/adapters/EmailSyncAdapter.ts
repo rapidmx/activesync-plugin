@@ -9,9 +9,11 @@ import { ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, opaqueElement, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { toCompactDateTime } from "../CompactDateTime.js";
-import type { EasCollectionSyncAdapter, SyncBodyPreference } from "./EasCollectionSyncAdapter.js";
+import { isProtocol16OrLater } from "../EasCommandHandler.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "./EasCollectionSyncAdapter.js";
 import { isGenuineDraft } from "../MessageMoveRules.js";
 import { truncateUtf8 } from "../MimeHeaderUtils.js";
+import { allDayDateToLocalMidnight, encodeTimeZone } from "../TimeZoneInfo.js";
 import {
     type Attachment,
     type BlobStore,
@@ -29,6 +31,7 @@ import {
     htmlToPlainText,
     MessageImportance,
     RecipientType,
+    resolveTimeZone,
 } from "@rapidmx/restapi";
 const { Init, Inject } = ObjectDecorators;
 
@@ -132,8 +135,8 @@ function labelKey(mailboxUid: string, labelUid: string): string {
  * Accept/Decline card already relies on, rather than a second, divergent parser). A pragmatic subset, deliberately
  * not the full MS-ASEMAIL semantics: `BusyStatus`/`Sensitivity` have no source field in an invite's own
  * iCalendar file, so both use the spec's documented default (the same choice `CalendarSyncAdapter` already makes
- * for `Sensitivity`); `Recurrences`/`GlobalObjId`/`TimeZone` are not emitted (the same documented gap
- * `CalendarSyncAdapter` already carries for its own `TimeZone`). An invite whose `.ics` can't be read or has no
+ * for `Sensitivity`); `Recurrences`/`GlobalObjId` are not emitted. `TimeZone` is (see `meetingRequestElement()`). An
+ * invite whose `.ics` can't be read or has no
  * `StartTime`/`EndTime` simply renders without a `MeetingRequest` element - the email itself still syncs
  * normally, just without invite recognition on the device.
  *
@@ -178,18 +181,18 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         }
     }
 
-    public async toApplicationData(message: Message, bodyPreference?: SyncBodyPreference): Promise<WbxmlElement> {
-        return (await this.toApplicationDataBatch([message], bodyPreference))[0];
+    public async toApplicationData(message: Message, bodyPreference?: SyncBodyPreference, render?: SyncRenderContext): Promise<WbxmlElement> {
+        return (await this.toApplicationDataBatch([message], bodyPreference, render))[0];
     }
 
     /** Renders a whole page of messages, resolving every referenced `Label` with one `find()` per distinct
      * mailbox (in practice one per page) instead of one per labelled message, and likewise batching the
      * `Attachment`/`MeetingRequest`/body lookups below rather than doing any of them per message. */
-    public async toApplicationDataBatch(messages: Message[], bodyPreference?: SyncBodyPreference): Promise<WbxmlElement[]> {
+    public async toApplicationDataBatch(messages: Message[], bodyPreference?: SyncBodyPreference, render?: SyncRenderContext): Promise<WbxmlElement[]> {
         const [labelNames, attachmentsByMessage, meetingRequestsByMessage, bodiesByMessage] = await Promise.all([
             this.resolveLabelNames(messages),
             this.resolveAttachments(messages),
-            this.resolveMeetingRequests(messages),
+            this.resolveMeetingRequests(messages, render),
             this.resolveBodies(messages, bodyPreference),
         ]);
         return messages.map((message) => {
@@ -238,7 +241,7 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
      * per-batch work here) rather than serially. A message whose `.ics` can't be read or parsed, or that has no
      * `StartTime`/`EndTime`, simply has no entry - `render()` then omits the element rather than fail the whole
      * item (see `SyncCommand.ts`'s own comment on why a render failure must never be lightly reintroduced). */
-    private async resolveMeetingRequests(messages: Message[]): Promise<Map<string, WbxmlElement>> {
+    private async resolveMeetingRequests(messages: Message[], render: SyncRenderContext | undefined): Promise<Map<string, WbxmlElement>> {
         const byMessage = new Map<string, WbxmlElement>();
         const candidates = messages.filter((m) => m.meetingMethod === "REQUEST" && m.bodyBlobKey);
         await Promise.all(
@@ -248,7 +251,7 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                     const ics = await extractIcsFromRaw(raw);
                     const parsed: ParsedIcsEvent | undefined = ics ? parseInviteIcs(ics) : undefined;
                     if (parsed?.startDate && parsed?.endDate) {
-                        byMessage.set(message.uid, meetingRequestElement(parsed));
+                        byMessage.set(message.uid, meetingRequestElement(parsed, render));
                     }
                 } catch {
                     // Malformed/unreadable .ics: no MeetingRequest for this one message, same tolerant-of-a-bad-
@@ -583,18 +586,24 @@ function attachmentsElement(attachments: Attachment[]): WbxmlElement {
 }
 
 /** MS-ASEMAIL `MeetingRequest` - see this file's own doc comment for the pragmatic-subset fields this
- * deliberately omits (`Recurrences`/`GlobalObjId`/`TimeZone`) and why `BusyStatus`/`Sensitivity` are fixed. Only
- * called once `resolveMeetingRequests()` has already confirmed `parsed.startDate`/`endDate` are both present. */
-function meetingRequestElement(parsed: ParsedIcsEvent): WbxmlElement {
+ * deliberately omits (`Recurrences`/`GlobalObjId`) and why `BusyStatus`/`Sensitivity` are fixed. `TimeZone` (which
+ * MS-ASEMAIL requires) is the invite's own zone, else the mailbox's, else UTC; an all-day invite's dates go out the way
+ * `CalendarSyncAdapter` sends an all-day event's - date-only from protocol 16.0, local midnights in that zone before it.
+ * Only called once `resolveMeetingRequests()` has already confirmed `parsed.startDate`/`endDate` are both present. */
+function meetingRequestElement(parsed: ParsedIcsEvent, render: SyncRenderContext | undefined): WbxmlElement {
+    const zone: string = resolveTimeZone(parsed.timezone) ?? resolveTimeZone(render?.mailboxTimezone) ?? "UTC";
+    const allDay: boolean = inviteIsAllDay(parsed);
+    const onWire = (value: Date): Date => (allDay && !isProtocol16OrLater(render?.protocolVersion) ? allDayDateToLocalMidnight(value, zone) : value);
     return element(WbxmlCodePage.Email, "MeetingRequest", [
         textElement(WbxmlCodePage.Email, "DtStamp", toCompactDateTime(parsed.dtstamp ?? new Date())),
-        textElement(WbxmlCodePage.Email, "StartTime", toCompactDateTime(parsed.startDate!)),
-        textElement(WbxmlCodePage.Email, "EndTime", toCompactDateTime(parsed.endDate!)),
-        textElement(WbxmlCodePage.Email, "AllDayEvent", inviteIsAllDay(parsed) ? "1" : "0"),
+        textElement(WbxmlCodePage.Email, "StartTime", toCompactDateTime(onWire(parsed.startDate!))),
+        textElement(WbxmlCodePage.Email, "EndTime", toCompactDateTime(onWire(parsed.endDate!))),
+        textElement(WbxmlCodePage.Email, "AllDayEvent", allDay ? "1" : "0"),
         ...(parsed.location ? [textElement(WbxmlCodePage.Email, "Location", parsed.location)] : []),
         ...(parsed.organizer?.address ? [textElement(WbxmlCodePage.Email, "Organizer", parsed.organizer.address)] : []),
         textElement(WbxmlCodePage.Email, "BusyStatus", "2"),
         textElement(WbxmlCodePage.Email, "Sensitivity", "0"),
+        textElement(WbxmlCodePage.Email, "TimeZone", encodeTimeZone(zone, parsed.startDate!)),
         textElement(WbxmlCodePage.Email, "InstanceType", parsed.recurrenceRule ? "1" : "0"),
         textElement(WbxmlCodePage.Email, "ResponseRequested", "1"),
         textElement(WbxmlCodePage.Email, "DisallowNewTimeProposal", "0"),

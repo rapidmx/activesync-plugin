@@ -10,6 +10,7 @@
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { element, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { EmailSyncAdapter } from "../../src/adapters/EmailSyncAdapter.js";
+import { decodeTimeZoneInformation } from "../../src/TimeZoneInfo.js";
 import { FolderType, MessageImportance, RecipientType, type Mailbox, type Message } from "@rapidmx/restapi";
 
 /** `EmailSyncAdapter` is abstract (it needs a backend-specific `labelClass`, supplied by
@@ -651,6 +652,36 @@ describe("EmailSyncAdapter Tests", () => {
             expect(field("AllDayEvent")).toBe("0");
             expect(field("ResponseRequested")).toBe("1");
             expect(field("InstanceType")).toBe("0");
+            // No zone in the invite or the render context: UTC.
+            expect(decodeTimeZoneInformation(field("TimeZone")!)!.standardName).toBe("UTC");
+        });
+
+        it("Renders MeetingRequest's TimeZone from the invite's own zone, else the mailbox's, and an all-day invite's dates per protocol version.", async () => {
+            const meetingField = async (ics: string, render?: any) => {
+                const { adapter, get } = buildAdapter();
+                get.mockResolvedValue(inviteRawMime(ics));
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, meetingMethod: "REQUEST", bodyBlobKey: "bodies/invite-1" }], undefined, render);
+                return (tag: string) => meetingRequestOf(rendered)!.children.find((c) => c.tag === tag)?.text;
+            };
+            const zoned = VALID_INVITE_ICS.replace("DTSTART:20260615T120000Z", "DTSTART;TZID=America/New_York:20260615T080000").replace(
+                "DTEND:20260615T130000Z",
+                "DTEND;TZID=America/New_York:20260615T090000",
+            );
+            const ny = await meetingField(zoned, { mailboxTimezone: "Europe/Berlin" });
+            expect(ny("StartTime")).toBe("20260615T120000Z");
+            expect(decodeTimeZoneInformation(ny("TimeZone")!)!.standardName).toBe("Eastern Standard Time");
+
+            const mailboxZone = await meetingField(VALID_INVITE_ICS, { mailboxTimezone: "Europe/Berlin" });
+            expect(decodeTimeZoneInformation(mailboxZone("TimeZone")!)!.standardName).toBe("W. Europe Standard Time");
+
+            const allDay = VALID_INVITE_ICS.replace("DTSTART:20260615T120000Z", "DTSTART;VALUE=DATE:20260615").replace("DTEND:20260615T130000Z", "DTEND;VALUE=DATE:20260616");
+            const v16 = await meetingField(allDay, { protocolVersion: "16.1", mailboxTimezone: "Europe/Berlin" });
+            expect(v16("AllDayEvent")).toBe("1");
+            expect(v16("StartTime")).toBe("20260615T000000Z");
+            expect(v16("EndTime")).toBe("20260616T000000Z");
+            const v14 = await meetingField(allDay, { protocolVersion: "14.1", mailboxTimezone: "Europe/Berlin" });
+            expect(v14("StartTime")).toBe("20260614T220000Z");
+            expect(v14("EndTime")).toBe("20260615T220000Z");
         });
 
         it("Omits MeetingRequest (without failing the message) when the .ics is unreadable, has no method, or is simply absent.", async () => {

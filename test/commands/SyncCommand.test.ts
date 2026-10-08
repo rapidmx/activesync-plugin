@@ -606,12 +606,12 @@ describe("SyncCommand Tests (isolated)", () => {
                 ]),
             ]);
             await commandWith.handle(buildContext(syncRequest("Fake", [], [bodyPreferenceOptions])).ctx);
-            expect(withPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), { type: "2", truncationSize: 4096 });
+            expect(withPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), { type: "2", truncationSize: 4096 }, expect.anything());
 
             const withoutPreference = vi.fn().mockResolvedValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
             const { command: commandWithout } = await buildCommand("Fake", fakeAdapter({ toApplicationData: withoutPreference }), repoWith());
             await commandWithout.handle(buildContext(syncRequest("Fake", [])).ctx);
-            expect(withoutPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), undefined);
+            expect(withoutPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), undefined, expect.anything());
         });
 
         it("Picks the HTML BodyPreference over a plain-text sibling regardless of which came first in the request, when a device (e.g. Apple Mail) sends more than one - a real device report showed a plain-text BodyPreference listed before an HTML one, and honouring whichever came first produced a body the device couldn't render.", async () => {
@@ -637,7 +637,56 @@ describe("SyncCommand Tests (isolated)", () => {
 
             await command.handle(buildContext(syncRequest("Fake", [], [plainTextFirst])).ctx);
 
-            expect(render).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), { type: "2", truncationSize: 32768 });
+            expect(render).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), { type: "2", truncationSize: 32768 }, expect.anything());
+        });
+
+        describe("render context (protocol version and the mailbox's zone)", () => {
+            const changed = (item: Record<string, any> = {}): any =>
+                fakeRepo({
+                    find: vi.fn().mockImplementation(async (query: any) =>
+                        !query.deleted && query.folderUid === FOLDER_UID
+                            ? [{ uid: "item-1", folderUid: FOLDER_UID, dateModified: new Date("2026-02-01T00:00:00.000Z"), ...item }]
+                            : [],
+                    ),
+                });
+            const withVersion = (cls: string, version: string) => ({ ...buildContext(syncRequest(cls, [])).ctx, protocolVersion: version });
+
+            it("Hands a Calendar render the client's protocol version and the folder mailbox's zone.", async () => {
+                const render = vi.fn().mockReturnValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
+                const { command } = await buildCommand("Calendar", fakeAdapter({ collectionClass: "Calendar", toApplicationData: render }), changed(), {
+                    state: storedState({ collectionClass: "Calendar" }),
+                });
+                (command as any).mailboxRepo.findOne.mockResolvedValue({ uid: "mbx-1", timezone: "Europe/Berlin" });
+
+                await command.handle(withVersion("Calendar", "16.1"));
+
+                expect(render).toHaveBeenCalledWith(expect.anything(), undefined, { protocolVersion: "16.1", mailboxTimezone: "Europe/Berlin" });
+            });
+
+            it("Renders without the mailbox's zone, rather than failing the round, when the mailbox can't be read.", async () => {
+                const render = vi.fn().mockReturnValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
+                const { command } = await buildCommand("Calendar", fakeAdapter({ collectionClass: "Calendar", toApplicationData: render }), changed(), {
+                    state: storedState({ collectionClass: "Calendar" }),
+                });
+                (command as any).mailboxRepo.findOne.mockResolvedValue(undefined);
+
+                const response = await command.handle(withVersion("Calendar", "14.1"));
+
+                expect(childText(collection(response!), "Status")).toBe("1");
+                expect(render).toHaveBeenCalledWith(expect.anything(), undefined, { protocolVersion: "14.1", mailboxTimezone: undefined });
+            });
+
+            it("Looks the mailbox up for an Email round only when it renders a meeting invite.", async () => {
+                const render = vi.fn().mockReturnValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
+                const { command } = await buildCommand("Email", fakeAdapter({ collectionClass: "Email", toApplicationData: render }), changed({ meetingMethod: "REQUEST" }), {
+                    state: storedState({ collectionClass: "Email" }),
+                });
+                (command as any).mailboxRepo.findOne.mockResolvedValue({ uid: "mbx-1", timezone: "Asia/Tokyo" });
+
+                await command.handle(withVersion("Email", "16.0"));
+
+                expect(render).toHaveBeenCalledWith(expect.anything(), undefined, { protocolVersion: "16.0", mailboxTimezone: "Asia/Tokyo" });
+            });
         });
     });
 
@@ -960,7 +1009,7 @@ describe("SyncCommand Tests (isolated)", () => {
             expect(childText(fetchResponse, "ServerId")).toBe("item-1");
             expect(childText(fetchResponse, "Status")).toBe("1");
             expect(childText(findChild(fetchResponse, "ApplicationData")!, "Subject")).toBe("Hi");
-            expect(render).toHaveBeenCalledWith(existing, { type: "4", truncationSize: undefined });
+            expect(render).toHaveBeenCalledWith(existing, { type: "4", truncationSize: undefined }, expect.anything());
         });
 
         it("Reports Status 8 when ServerId doesn't resolve (or resolves outside this collection), and Status 6 when the adapter's render throws - and ignores a Fetch with no ServerId at all. No separate per-item READ check: handleCollection()'s own gate already requires READ on this exact folder before any command in it runs.", async () => {

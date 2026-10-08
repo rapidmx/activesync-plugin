@@ -31,6 +31,14 @@ export interface SyncBodyPreference {
     truncationSize?: number;
 }
 
+/** Per-request facts rendering may depend on beyond the item itself. */
+export interface SyncRenderContext {
+    /** The client's negotiated protocol version (`EasCommandContext.protocolVersion`) - see `isProtocol16OrLater()`. */
+    protocolVersion?: string;
+    /** The IANA zone of the mailbox that owns the collection, for an item that has no recognizable zone of its own. */
+    mailboxTimezone?: string;
+}
+
 export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
     /** The MS-ASCMD `Class` value this adapter handles, e.g. `"Email"`. */
     readonly collectionClass: string;
@@ -40,13 +48,15 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
      * rendering `Categories`; every other adapter today returns a plain `WbxmlElement`, which callers `await`
      * through unchanged (the same optional-async shape `fromApplicationData` already established below).
      * `bodyPreference` is the device's `Options/BodyPreference` for this round, when it sent one - adapters that
-     * don't need it (everything but `EmailSyncAdapter`) simply ignore the parameter. */
-    toApplicationData(item: T, bodyPreference?: SyncBodyPreference): WbxmlElement | Promise<WbxmlElement>;
+     * don't need it (everything but `EmailSyncAdapter`) simply ignore the parameter. `render` carries the protocol
+     * version and the mailbox's zone, which time zone and all-day rendering depend on (`CalendarSyncAdapter`, and
+     * `EmailSyncAdapter`'s `MeetingRequest`). */
+    toApplicationData(item: T, bodyPreference?: SyncBodyPreference, render?: SyncRenderContext): WbxmlElement | Promise<WbxmlElement>;
 
     /** Optional bulk form of `toApplicationData`, returning one element per item in the same order. Implemented
      * where rendering needs a lookup that is far cheaper done once for a whole page (`EmailSyncAdapter`'s
      * `Label`/`Attachment`/body-blob resolution); callers fall back to per-item `toApplicationData` when absent. */
-    toApplicationDataBatch?(items: T[], bodyPreference?: SyncBodyPreference): Promise<WbxmlElement[]>;
+    toApplicationDataBatch?(items: T[], bodyPreference?: SyncBodyPreference, render?: SyncRenderContext): Promise<WbxmlElement[]>;
 
     /**
      * Parses one client-originated `Add`/`Change` command's `<ApplicationData>` element (`el`) into a partial

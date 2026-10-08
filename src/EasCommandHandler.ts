@@ -23,6 +23,9 @@ export interface EasCommandContext {
     readonly deviceId: string;
     /** The client-supplied `?DeviceType=` query value (e.g. `iPhone`, `Android`). */
     readonly deviceType: string;
+    /** The protocol version the client negotiated for this request (its `MS-ASProtocolVersion` header, e.g. `"16.1"`),
+     * or `undefined` when it sent none - see `isProtocol16OrLater()`. Optional so isolated handler tests can omit it. */
+    readonly protocolVersion?: string;
     /** The policy key the device presented (`X-MS-PolicyKey` header, else the `?PolicyKey=` query value). For every
      * command except `Provision`/`Settings`, `BaseEasRoute` has already refused the request unless this equals the
      * stored `deviceSyncState.policyKey`. */
@@ -49,6 +52,16 @@ export interface EasCommandContext {
     /** The underlying HTTP response, when dispatched over HTTP - `PingCommand` registers `onFinish()` on it so a
      * long-poll stops waiting as soon as the client disconnects. Optional so isolated handler tests can omit it. */
     readonly res?: HttpResponse;
+}
+
+/**
+ * Whether `protocolVersion` is 16.0 or later - where several elements change meaning (e.g. an all-day event carries no
+ * `Timezone` and date-only times). A missing or unparseable version counts as earlier: [MS-ASHTTP] requires the header,
+ * so only an unusual client omits it, and the pre-16.0 forms are what every 14.x client also understands.
+ */
+export function isProtocol16OrLater(protocolVersion: string | undefined): boolean {
+    const version = Number.parseFloat(protocolVersion ?? "");
+    return Number.isFinite(version) && version >= 16;
 }
 
 /**

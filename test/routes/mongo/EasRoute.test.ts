@@ -31,6 +31,7 @@ import { WbxmlEncoder } from "../../../src/codec/WbxmlEncoder.js";
 import { WbxmlDecoder } from "../../../src/codec/WbxmlDecoder.js";
 import { element, textElement, opaqueElement, findChild, findChildren, childText, type WbxmlElement } from "../../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../../src/codec/WbxmlCodePages.js";
+import { decodeTimeZoneInformation, encodeTimeZone } from "../../../src/TimeZoneInfo.js";
 import {
     FolderType,
     MessageImportance,
@@ -237,12 +238,15 @@ describe("Route:EasRouteMongo Tests", () => {
     /** Posts a real WBXML-encoded request body and decodes the (also real WBXML) response back into a tree -
      * the same codec the server itself uses on both ends, per this project's testing philosophy of exercising
      * the actual wire format rather than a bypassed JSON shortcut. */
-    const postWbxml = async function (cmd: string, deviceId: string, requestBody?: WbxmlElement): Promise<WbxmlElement> {
+    const postWbxml = async function (cmd: string, deviceId: string, requestBody?: WbxmlElement, headers: Record<string, string> = {}): Promise<WbxmlElement> {
         const req = request(server.getApplication())
             .post(`${baseUrl}?Cmd=${cmd}&DeviceId=${deviceId}`)
             .set("Authorization", "jwt " + ownerToken)
             .set("X-MS-PolicyKey", await policyKeyOf(deviceId))
             .set("Content-Type", "application/vnd.ms-sync.wbxml");
+        for (const [name, value] of Object.entries(headers)) {
+            req.set(name, value);
+        }
         const result = requestBody ? await req.send(new WbxmlEncoder().encode(requestBody)) : await req;
         expect(result.status).toBeGreaterThanOrEqual(200);
         expect(result.status).toBeLessThan(300);
@@ -1593,6 +1597,35 @@ describe("Route:EasRouteMongo Tests", () => {
             expect(findChild(recurrence, "Occurrences")).toBeUndefined();
         });
 
+        it("Sends a timed event's zone, and an all-day event per the client's MS-ASProtocolVersion: date-only without a Timezone from 16.0, local midnights beside its zone before it.", async () => {
+            const mailbox = await createMailbox(owner.uid);
+            await provisionDevice("dev1");
+            const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+            await createCalendarEvent(mailbox.uid, folder.uid, {
+                title: "Holiday",
+                allDay: true,
+                timezone: "Europe/Berlin",
+                startDate: new Date("2026-10-08T00:00:00.000Z"),
+                endDate: new Date("2026-10-09T00:00:00.000Z"),
+            });
+            const syncAs = async (version: string): Promise<WbxmlElement> => {
+                const headers = { "MS-ASProtocolVersion": version };
+                const initial = await postWbxml("Sync", "dev1", syncRequest("0", "Calendar", folder.uid), headers);
+                const key = childText(findChild(findChild(initial, "Collections")!, "Collection")!, "SyncKey")!;
+                return firstAddAppData(await postWbxml("Sync", "dev1", syncRequest(key, "Calendar", folder.uid), headers));
+            };
+
+            const v16 = await syncAs("16.1");
+            expect(findChild(v16, "Timezone")).toBeUndefined();
+            expect(childText(v16, "StartTime")).toBe("20261008T000000Z");
+            expect(childText(v16, "EndTime")).toBe("20261009T000000Z");
+
+            const v14 = await syncAs("14.1");
+            expect(decodeTimeZoneInformation(childText(v14, "Timezone")!)!.standardName).toBe("W. Europe Standard Time");
+            expect(childText(v14, "StartTime")).toBe("20261007T220000Z");
+            expect(childText(v14, "EndTime")).toBe("20261008T220000Z");
+        });
+
         it("Reports an all-day event with a bounded recurrence and a nameless attendee.", async () => {
             const mailbox = await createMailbox(owner.uid);
             await provisionDevice("dev1");
@@ -1799,6 +1832,52 @@ describe("Route:EasRouteMongo Tests", () => {
                 expect(created?.emails).toEqual([{ address: "new@example.com", type: ContactAddressKind.OTHER }]);
                 expect(created?.mailboxUid).toBe(mailbox.uid);
                 expect(created?.folderUid).toBe(folder.uid);
+            });
+
+            it("Stores a device-created event's Timezone as its IANA zone, and a pre-16.0 all-day Add's local midnights as its dates.", async () => {
+                const mailbox = await createMailbox(owner.uid);
+                await provisionDevice("dev1");
+                const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                const syncKey = await initialSyncKey("Calendar", folder.uid);
+                const cal = (tag: string, value: string) => textElement(WbxmlCodePage.Calendar, tag, value);
+                const add = (clientId: string, fields: WbxmlElement[]) =>
+                    element(WbxmlCodePage.AirSync, "Add", [
+                        textElement(WbxmlCodePage.AirSync, "ClientId", clientId),
+                        element(WbxmlCodePage.AirSync, "ApplicationData", [cal("OrganizerEmail", "owner@example.com"), ...fields]),
+                    ]);
+
+                const response = await postWbxml(
+                    "Sync",
+                    "dev1",
+                    syncRequestWithCommands(syncKey, "Calendar", folder.uid, [
+                        add("timed", [
+                            cal("Timezone", encodeTimeZone("America/New_York", new Date("2026-03-01T14:00:00Z"))),
+                            cal("Subject", "Standup"),
+                            cal("StartTime", "20260301T140000Z"),
+                            cal("EndTime", "20260301T143000Z"),
+                        ]),
+                        add("allday", [
+                            cal("Timezone", encodeTimeZone("Europe/Berlin", new Date("2026-10-08T00:00:00Z"))),
+                            cal("Subject", "Holiday"),
+                            cal("AllDayEvent", "1"),
+                            cal("StartTime", "20261007T220000Z"),
+                            cal("EndTime", "20261008T220000Z"),
+                        ]),
+                    ]),
+                    { "MS-ASProtocolVersion": "14.1" },
+                );
+
+                const adds = findChildren(findChild(collectionOf(response), "Responses")!, "Add");
+                const created = async (clientId: string) =>
+                    await calendarEventRepo.findOne({ uid: childText(adds.find((a) => childText(a, "ClientId") === clientId)!, "ServerId") });
+                const timed = await created("timed");
+                expect(timed?.timezone).toBe("America/New_York");
+                expect(timed?.startDate.toISOString()).toBe("2026-03-01T14:00:00.000Z");
+                const allDay = await created("allday");
+                expect(allDay?.timezone).toBe("Europe/Berlin");
+                expect(allDay?.allDay).toBe(true);
+                expect(allDay?.startDate.toISOString()).toBe("2026-10-08T00:00:00.000Z");
+                expect(allDay?.endDate.toISOString()).toBe("2026-10-09T00:00:00.000Z");
             });
 
             it("Creates a calendar event via a client-originated Add, assigning a unique icalUid and sequence 0.", async () => {

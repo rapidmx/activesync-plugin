@@ -514,6 +514,7 @@ describe("EasCollectionSync Tests", () => {
     it("classForFolderType maps a folder's type to the Class it holds.", () => {
         expect(classForFolderType(FolderType.CALENDAR)).toBe("Calendar");
         expect(classForFolderType(FolderType.CONTACTS)).toBe("Contacts");
+        expect(classForFolderType(FolderType.SUGGESTED_CONTACTS)).toBe("Contacts");
         expect(classForFolderType(FolderType.TASKS)).toBe("Tasks");
         expect(classForFolderType(FolderType.INBOX)).toBe("Email");
         expect(classForFolderType(FolderType.USER)).toBe("Email");

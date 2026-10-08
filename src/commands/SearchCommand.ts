@@ -8,7 +8,7 @@ import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import type { EmailSyncAdapter } from "../adapters/EmailSyncAdapter.js";
-import { AuditAction, AuditLogUtils, hasMailAccess, type Contact, type Message } from "@rapidmx/restapi";
+import { AuditAction, AuditLogUtils, hasMailAccess, type Contact, type Mailbox, type Message } from "@rapidmx/restapi";
 import type { SearchProvider } from "@rapidmx/restapi/search";
 import { boundedEscapedPattern } from "../RegexPatternUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
@@ -288,7 +288,15 @@ export abstract class SearchCommand implements EasCommandHandler {
         const readable: boolean[] = await Promise.all(candidates.map((message) => canRead(message.folderUid)));
         const matches: Message[] = candidates.filter((_message, i) => readable[i]);
         const { page, rangeStart, rangeEnd } = paginate(matches, start, end);
-        const applicationData: WbxmlElement[] = await this.emailAdapter!.toApplicationDataBatch(page);
+        // The caller's protocol version and mailbox zone, for a hit carrying a meeting invite (its `MeetingRequest` times
+        // and `TimeZone` - see `EmailSyncAdapter`).
+        const mailbox: Mailbox | undefined = page.some((message) => message.meetingMethod === "REQUEST")
+            ? await this.mailboxRepo!.findOne(ctx.mailboxUid, { ignoreACL: true })
+            : undefined;
+        const applicationData: WbxmlElement[] = await this.emailAdapter!.toApplicationDataBatch(page, undefined, {
+            protocolVersion: ctx.protocolVersion,
+            mailboxTimezone: mailbox?.timezone,
+        });
         const results = page.map((message, i) => this.messageToResult(message, applicationData[i]));
         await this.auditResults(ctx, page);
 

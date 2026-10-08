@@ -250,6 +250,7 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             mailboxUid,
             deviceId,
             deviceType,
+            protocolVersion: firstQueryValue(req.headers["ms-asprotocolversion"])?.trim(),
             policyKey: firstQueryValue(req.headers["x-ms-policykey"]) ?? policyKey,
             deviceSyncState,
             deviceSyncStateRepo: this.deviceSyncStateRepo,

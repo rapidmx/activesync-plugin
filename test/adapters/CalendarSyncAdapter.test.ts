@@ -9,6 +9,7 @@
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { CalendarSyncAdapter, localDayAndMonth, MAX_CALENDAR_ATTENDEES } from "../../src/adapters/CalendarSyncAdapter.js";
+import { decodeTimeZoneInformation, encodeTimeZone } from "../../src/TimeZoneInfo.js";
 import { AttendeeResponseStatus, AttendeeRole, BusyStatus, RecipientType, RecurrenceFrequency } from "@rapidmx/restapi";
 
 const adapter = new CalendarSyncAdapter();
@@ -33,14 +34,21 @@ describe("CalendarSyncAdapter Tests", () => {
                 cal("Location", "Room 1"),
                 cal("StartTime", "20260102T090000Z"),
                 cal("EndTime", "20260102T093000Z"),
-                cal("AllDayEvent", "1"),
+                cal("AllDayEvent", "0"),
             ]);
             const partial = adapter.fromApplicationData(el);
             expect(partial.title).toBe("Standup");
             expect(partial.location).toBe("Room 1");
             expect(partial.startDate?.toISOString()).toBe("2026-01-02T09:00:00.000Z");
             expect(partial.endDate?.toISOString()).toBe("2026-01-02T09:30:00.000Z");
+            expect(partial.allDay).toBe(false);
+        });
+
+        it("Parses AllDayEvent '1' and stores its times as the dates they fall on.", () => {
+            const partial = adapter.fromApplicationData(appData([cal("StartTime", "20260102T090000Z"), cal("EndTime", "20260103T000000Z"), cal("AllDayEvent", "1")]));
             expect(partial.allDay).toBe(true);
+            expect(partial.startDate?.toISOString()).toBe("2026-01-02T00:00:00.000Z");
+            expect(partial.endDate?.toISOString()).toBe("2026-01-03T00:00:00.000Z");
         });
 
         it("Interprets AllDayEvent '0' as false.", () => {
@@ -387,6 +395,122 @@ describe("CalendarSyncAdapter Tests", () => {
             const same = appData([element(WbxmlCodePage.Calendar, "Attendees", [element(WbxmlCodePage.Calendar, "Attendee", [cal("Email", "a@example.com")])])]);
             expect(adapter.fromApplicationData(same, existing).sequence).toBeUndefined();
             expect(adapter.fromApplicationData(same, { ...existing, attendees: undefined }).sequence).toBe(4);
+        });
+    });
+
+    describe("time zones and all-day events", () => {
+        const v14 = { protocolVersion: "14.1" };
+        const v16 = { protocolVersion: "16.1" };
+        const timed = (overrides: Record<string, any> = {}): any => ({
+            ...baseEvent(),
+            timezone: "America/Los_Angeles",
+            startDate: new Date("2026-07-01T16:00:00.000Z"),
+            endDate: new Date("2026-07-01T17:00:00.000Z"),
+            ...overrides,
+        });
+        const allDay = (overrides: Record<string, any> = {}): any =>
+            timed({
+                allDay: true,
+                timezone: "Europe/Berlin",
+                startDate: new Date("2026-10-08T00:00:00.000Z"),
+                endDate: new Date("2026-10-09T00:00:00.000Z"),
+                ...overrides,
+            });
+        const zoneOf = (rendered: WbxmlElement): string | undefined => {
+            const value = childText(rendered, "Timezone");
+            return value === undefined ? undefined : decodeTimeZoneInformation(value)!.standardName;
+        };
+
+        it("Renders a timed event's own zone first, with UTC StartTime/EndTime, falling back to the mailbox's zone and then UTC.", () => {
+            const rendered = adapter.toApplicationData(timed(), undefined, v16);
+            expect(rendered.children[0].tag).toBe("Timezone");
+            expect(childText(rendered, "Timezone")).toBe(encodeTimeZone("America/Los_Angeles", new Date("2026-07-01T16:00:00.000Z")));
+            expect(childText(rendered, "StartTime")).toBe("20260701T160000Z");
+            expect(childText(rendered, "EndTime")).toBe("20260701T170000Z");
+
+            expect(zoneOf(adapter.toApplicationData(timed({ timezone: "" }), undefined, { mailboxTimezone: "Europe/Berlin" }))).toBe("W. Europe Standard Time");
+            expect(zoneOf(adapter.toApplicationData(timed({ timezone: "Not/AZone" })))).toBe("UTC");
+        });
+
+        it("From protocol 16.0, renders an all-day event with no Timezone and date-only times, Until included.", () => {
+            const rendered = adapter.toApplicationData(
+                allDay({ recurrenceRule: { freq: RecurrenceFrequency.WEEKLY, interval: 1, byDay: ["TH"], until: new Date("2026-12-31T00:00:00.000Z"), exceptions: [] } }),
+                undefined,
+                v16,
+            );
+            expect(childText(rendered, "Timezone")).toBeUndefined();
+            expect(childText(rendered, "StartTime")).toBe("20261008T000000Z");
+            expect(childText(rendered, "EndTime")).toBe("20261009T000000Z");
+            expect(childText(findChild(rendered, "Recurrence")!, "Until")).toBe("20261231T000000Z");
+        });
+
+        it("Before protocol 16.0 (or with no version), renders an all-day event as its dates' local midnights in its zone, beside that zone.", () => {
+            for (const render of [v14, undefined]) {
+                const rendered = adapter.toApplicationData(
+                    allDay({ recurrenceRule: { freq: RecurrenceFrequency.YEARLY, interval: 1, until: new Date("2030-10-08T00:00:00.000Z"), exceptions: [] } }),
+                    undefined,
+                    render,
+                );
+                expect(zoneOf(rendered)).toBe("W. Europe Standard Time");
+                expect(childText(rendered, "StartTime")).toBe("20261007T220000Z");
+                expect(childText(rendered, "EndTime")).toBe("20261008T220000Z");
+                const recurrence = findChild(rendered, "Recurrence")!;
+                expect(childText(recurrence, "Until")).toBe("20301007T220000Z");
+                // The stored dates are UTC midnights, so the day/month come from the date itself, not a zone's view of it.
+                expect(childText(recurrence, "DayOfMonth")).toBe("8");
+                expect(childText(recurrence, "MonthOfYear")).toBe("10");
+            }
+        });
+
+        it("Normalizes an all-day event stored with a time of day to its date on the wire.", () => {
+            const rendered = adapter.toApplicationData(allDay({ timezone: "UTC", startDate: new Date("2026-10-08T09:00:00.000Z"), endDate: new Date("2026-10-08T23:59:30.000Z") }), undefined, v16);
+            expect(childText(rendered, "StartTime")).toBe("20261008T000000Z");
+            expect(childText(rendered, "EndTime")).toBe("20261009T000000Z");
+        });
+
+        it("Decodes a device's Timezone to an IANA zone, preferring the event's and then the mailbox's zone when the rules match.", () => {
+            const pacific = encodeTimeZone("America/Los_Angeles", new Date("2026-07-01T16:00:00.000Z"));
+            const el = (tz: string) => appData([cal("Timezone", tz), cal("StartTime", "20260701T160000Z")]);
+            expect(adapter.fromApplicationData(el(pacific)).timezone).toBe("America/Los_Angeles");
+            expect(adapter.fromApplicationData(el(pacific), timed({ timezone: "America/Vancouver" })).timezone).toBe("America/Vancouver");
+            const mailbox: any = { primarySmtpAddress: "me@example.com", aliasAddresses: [], timezone: "America/Tijuana" };
+            expect(adapter.fromApplicationData(el(pacific), undefined, mailbox).timezone).toBe("America/Tijuana");
+        });
+
+        it("Keeps the zone when the device's Timezone can't be decoded, and gives a new event without one the mailbox's zone.", () => {
+            expect(adapter.fromApplicationData(appData([cal("Timezone", "garbage")]), timed()).timezone).toBeUndefined();
+            const mailbox: any = { primarySmtpAddress: "me@example.com", aliasAddresses: [], timezone: "Europe/Berlin" };
+            expect(adapter.fromApplicationData(appData([cal("Subject", "x")]), undefined, mailbox).timezone).toBe("Europe/Berlin");
+            expect(adapter.fromApplicationData(appData([cal("Subject", "x")]), undefined, { ...mailbox, timezone: "" }).timezone).toBeUndefined();
+            expect(adapter.fromApplicationData(appData([cal("Subject", "x")]), timed(), mailbox).timezone).toBeUndefined();
+        });
+
+        it("Stores an all-day event's local-midnight times (before 16.0) and date-only times (16.0+) as the same dates, Until included.", () => {
+            const berlin = encodeTimeZone("Europe/Berlin", new Date("2026-10-08T00:00:00.000Z"));
+            const v14Add = adapter.fromApplicationData(
+                appData([
+                    cal("Timezone", berlin),
+                    cal("AllDayEvent", "1"),
+                    cal("StartTime", "20261007T220000Z"),
+                    cal("EndTime", "20261008T220000Z"),
+                    element(WbxmlCodePage.Calendar, "Recurrence", [cal("Type", "5"), cal("Until", "20301007T220000Z")]),
+                ]),
+            );
+            expect(v14Add.timezone).toBe("Europe/Berlin");
+            expect(v14Add.startDate?.toISOString()).toBe("2026-10-08T00:00:00.000Z");
+            expect(v14Add.endDate?.toISOString()).toBe("2026-10-09T00:00:00.000Z");
+            expect(new Date(v14Add.recurrenceRule!.until!).toISOString()).toBe("2030-10-08T00:00:00.000Z");
+
+            const mailbox: any = { primarySmtpAddress: "me@example.com", aliasAddresses: [], timezone: "Europe/Berlin" };
+            const v16Add = adapter.fromApplicationData(appData([cal("AllDayEvent", "1"), cal("StartTime", "20261008T000000Z"), cal("EndTime", "20261009T000000Z")]), undefined, mailbox);
+            expect(v16Add.timezone).toBe("Europe/Berlin");
+            expect(v16Add.startDate?.toISOString()).toBe("2026-10-08T00:00:00.000Z");
+            expect(v16Add.endDate?.toISOString()).toBe("2026-10-09T00:00:00.000Z");
+        });
+
+        it("Reads a Change to an existing all-day event's times in the event's own zone.", () => {
+            const partial = adapter.fromApplicationData(appData([cal("StartTime", "20261009T220000Z")]), allDay());
+            expect(partial.startDate?.toISOString()).toBe("2026-10-10T00:00:00.000Z");
         });
     });
 
