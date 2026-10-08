@@ -821,11 +821,28 @@ export abstract class SyncCommand implements EasCommandHandler {
     }
 }
 
+/** MS-ASAIRSYNCBASE `Body.Type` values, richest-first, used to pick among several `BodyPreference` siblings a
+ * device sent: `"2"` (HTML) over `"1"` (plain text) - matches `EmailSyncAdapter.resolveBodies()`'s own
+ * HTML-over-plain-text preference. `"4"` (raw MIME) is deliberately not in this list: unlike `ItemOperations`
+ * `Fetch` (which honors an explicit `Type 4` as the device's own direct request for raw source), a `Sync` page
+ * renders many messages at once and MIME isn't a type `EmailSyncAdapter` ever produces inline. */
+const BODY_PREFERENCE_TYPE_PRIORITY = ["2", "1"];
+
 /** Parses a collection's `Options/BodyPreference` (MS-ASAIRSYNCBASE), or `undefined` when the device sent none -
  * the adapter then falls back to its own default rendering (`EmailSyncAdapter`'s short preview, unaffected). A
- * `Type`-only `BodyPreference` (no `TruncationSize`) is "no truncation wanted", not "send nothing". */
+ * `Type`-only `BodyPreference` (no `TruncationSize`) is "no truncation wanted", not "send nothing".
+ *
+ * `BodyPreference` is repeatable - a real device (confirmed against a live Apple Mail capture) commonly sends
+ * one per `Type` it can render (plain text, HTML, MIME) so the server can pick whichever it supports best, not
+ * just one fixed type. `findChild()` only ever returned the first sibling in document order, which is not
+ * necessarily the richest one on offer - picking a plain-text `BodyPreference` that happened to come first (its
+ * own small `TruncationSize`, mismatched `Type`) over a later HTML one made the response not match what the
+ * device actually asked for, which is exactly the "message cannot be downloaded" symptom a real device showed
+ * with no further `ItemOperations Fetch` ever following the `Sync` that returned it. Preferring HTML over plain
+ * text matches `EmailSyncAdapter.resolveBodies()`'s own existing type preference. */
 function parseBodyPreference(optionsEl: WbxmlElement | undefined): SyncBodyPreference | undefined {
-    const bodyPreferenceEl = optionsEl ? findChild(optionsEl, "BodyPreference") : undefined;
+    const bodyPreferenceEls = optionsEl ? findChildren(optionsEl, "BodyPreference") : [];
+    const bodyPreferenceEl = selectBestBodyPreference(bodyPreferenceEls);
     if (!bodyPreferenceEl) {
         return undefined;
     }
@@ -835,4 +852,19 @@ function parseBodyPreference(optionsEl: WbxmlElement | undefined): SyncBodyPrefe
         type: childText(bodyPreferenceEl, "Type"),
         truncationSize: truncationSize !== undefined && Number.isFinite(truncationSize) ? truncationSize : undefined,
     };
+}
+
+/** Picks the richest `BodyPreference` among every sibling a device sent, in `BODY_PREFERENCE_TYPE_PRIORITY`
+ * order - HTML over plain text, since that's the richer type this library can actually render (see
+ * `EmailSyncAdapter`'s own HTML-over-plain-text preference). A `BodyPreference` with no `Type` at all, or a
+ * `Type` outside that priority list, is only used when nothing better was offered, so a device's own ordering
+ * is no longer load-bearing. */
+function selectBestBodyPreference(bodyPreferenceEls: WbxmlElement[]): WbxmlElement | undefined {
+    for (const wantedType of BODY_PREFERENCE_TYPE_PRIORITY) {
+        const match = bodyPreferenceEls.find((el) => childText(el, "Type") === wantedType);
+        if (match) {
+            return match;
+        }
+    }
+    return bodyPreferenceEls[0];
 }

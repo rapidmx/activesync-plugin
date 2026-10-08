@@ -612,6 +612,32 @@ describe("SyncCommand Tests (isolated)", () => {
             await commandWithout.handle(buildContext(syncRequest("Fake", [])).ctx);
             expect(withoutPreference).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), undefined);
         });
+
+        it("Picks the HTML BodyPreference over a plain-text sibling regardless of which came first in the request, when a device (e.g. Apple Mail) sends more than one - a real device report showed a plain-text BodyPreference listed before an HTML one, and honouring whichever came first produced a body the device couldn't render.", async () => {
+            const repo = fakeRepo({
+                find: vi.fn().mockImplementation(async (query: any) =>
+                    !query.deleted && query.folderUid === FOLDER_UID
+                        ? [{ uid: "item-1", folderUid: FOLDER_UID, dateModified: new Date("2026-02-01T00:00:00.000Z") }]
+                        : [],
+                ),
+            });
+            const render = vi.fn().mockResolvedValue(element(WbxmlCodePage.AirSync, "ApplicationData", []));
+            const { command } = await buildCommand("Fake", fakeAdapter({ toApplicationData: render }), repo);
+            const plainTextFirst = element(WbxmlCodePage.AirSync, "Options", [
+                element(WbxmlCodePage.AirSyncBase, "BodyPreference", [
+                    textElement(WbxmlCodePage.AirSyncBase, "Type", "1"),
+                    textElement(WbxmlCodePage.AirSyncBase, "TruncationSize", "1024"),
+                ]),
+                element(WbxmlCodePage.AirSyncBase, "BodyPreference", [
+                    textElement(WbxmlCodePage.AirSyncBase, "Type", "2"),
+                    textElement(WbxmlCodePage.AirSyncBase, "TruncationSize", "32768"),
+                ]),
+            ]);
+
+            await command.handle(buildContext(syncRequest("Fake", [], [plainTextFirst])).ctx);
+
+            expect(render).toHaveBeenCalledWith(expect.objectContaining({ uid: "item-1" }), { type: "2", truncationSize: 32768 });
+        });
     });
 
     describe("ACL/ownership enforcement (IDOR regression coverage)", () => {

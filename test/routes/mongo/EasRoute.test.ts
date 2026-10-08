@@ -3221,6 +3221,41 @@ describe("Route:EasRouteMongo Tests", () => {
             expect(childText(body, "Data")).toBe(rawMime);
         });
 
+        it("Picks the HTML BodyPreference over a plain-text sibling regardless of which came first - a real device (Apple Mail) sent BodyPreference elements in that order and the response it got back didn't match either one it asked for.", async () => {
+            const mailbox = await createMailbox(owner.uid);
+            await provisionDevice("dev1");
+            const folder = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+            const sanitizedHtmlBlobKey = `sanitized/${uuid.v4()}`;
+            await blobStore().put(sanitizedHtmlBlobKey, Buffer.from("<p>html body</p>"), { contentType: "text/html" });
+            const message = await createMessage(mailbox.uid, folder.uid, { sanitizedHtmlBlobKey });
+
+            const response = await postWbxml(
+                "ItemOperations",
+                "dev1",
+                element(WbxmlCodePage.ItemOperations, "ItemOperations", [
+                    element(WbxmlCodePage.ItemOperations, "Fetch", [
+                        textElement(WbxmlCodePage.ItemOperations, "Store", "Mailbox"),
+                        textElement(WbxmlCodePage.AirSync, "ServerId", message.uid),
+                        element(WbxmlCodePage.ItemOperations, "Options", [
+                            element(WbxmlCodePage.AirSyncBase, "BodyPreference", [
+                                textElement(WbxmlCodePage.AirSyncBase, "Type", "1"),
+                                textElement(WbxmlCodePage.AirSyncBase, "TruncationSize", "1024"),
+                            ]),
+                            element(WbxmlCodePage.AirSyncBase, "BodyPreference", [
+                                textElement(WbxmlCodePage.AirSyncBase, "Type", "2"),
+                                textElement(WbxmlCodePage.AirSyncBase, "TruncationSize", "32768"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            );
+
+            const fetch = findChild(findChild(response, "Response")!, "Fetch")!;
+            const body = findChild(findChild(fetch, "Properties")!, "Body")!;
+            expect(childText(body, "Type")).toBe("2");
+            expect(childText(body, "Data")).toBe("<p>html body</p>");
+        });
+
         it("Truncates the body to TruncationSize and sets Truncated when the body exceeds it.", async () => {
             const mailbox = await createMailbox(owner.uid);
             await provisionDevice("dev1");

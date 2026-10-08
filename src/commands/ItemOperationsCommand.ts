@@ -258,7 +258,17 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, ApiErrorMessages.AUTH_PERMISSION_FAILURE);
         }
 
-        const bodyPreferenceEl = optionsEl ? findChild(optionsEl, "BodyPreference") : undefined;
+        // `BodyPreference` is repeatable (MS-ASAIRSYNCBASE) - a device may list several `Type`s it can render,
+        // same as `SyncCommand.parseBodyPreference()`'s own identical fix. `findChild()` only ever returned the
+        // first sibling, which is not necessarily the one actually wanted. `"4"` (raw MIME) is checked first
+        // here, unlike `Sync`'s own priority list, since this method already treats an explicit `Type 4` as the
+        // device's own direct ask for raw source (see the `requestedType === "4"` branch below).
+        const bodyPreferenceEls = optionsEl ? findChildren(optionsEl, "BodyPreference") : [];
+        const bodyPreferenceEl =
+            bodyPreferenceEls.find((el) => childText(el, "Type") === "4") ??
+            bodyPreferenceEls.find((el) => childText(el, "Type") === "2") ??
+            bodyPreferenceEls.find((el) => childText(el, "Type") === "1") ??
+            bodyPreferenceEls[0];
         const requestedType = bodyPreferenceEl ? childText(bodyPreferenceEl, "Type") : undefined;
         const truncationSizeText = bodyPreferenceEl ? childText(bodyPreferenceEl, "TruncationSize") : undefined;
         const truncationSize = truncationSizeText !== undefined ? Number(truncationSizeText) : undefined;
