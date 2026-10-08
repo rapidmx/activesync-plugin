@@ -14,21 +14,34 @@ const EMAIL_TAGS = ["Email1Address", "Email2Address", "Email3Address"] as const;
 
 /** MS-ASCONTACTS street/city/state/postalCode/country tag prefixes, keyed by `ContactAddressKind`. There is no
  * generic "OtherPhoneNumber"-equivalent tag family gap here (Home/Business/Other all exist for addresses,
- * unlike phone numbers below), so all three kinds round-trip. */
+ * unlike phone numbers below), so all three kinds round-trip. `MOBILE` has no address tag family of its own
+ * (a mobile phone has no concept of a postal address distinct from Home/Work/Other) - never looked up via this
+ * map, since `addressTags()`/`toApplicationData()`'s address loop only ever iterate `ContactPostalAddress`
+ * entries, whose own `type` is never `MOBILE` in practice (nothing in this file ever produces one), but the
+ * `Record` must still be total since `ContactAddressKind` covers all four kinds now.
+ */
 const ADDRESS_PREFIX: Record<ContactAddressKind, string> = {
     [ContactAddressKind.HOME]: "Home",
     [ContactAddressKind.WORK]: "Business",
     [ContactAddressKind.OTHER]: "Other",
+    [ContactAddressKind.MOBILE]: "Mobile",
 };
 
-/** MS-ASCONTACTS has no `OtherPhoneNumber`-equivalent tag - only Home/Business phone numbers exist as plain
- * single-value tags (plus several Home2/Business2/Car/Radio/Pager/Fax variants this pragmatic subset doesn't
- * use). A phone tagged `OTHER` in this library's model has nowhere to go and is dropped, documented here rather
- * than silently - matching `FolderSyncCommand`'s own precedent for this kind of unavoidable field-count gap. */
+/** MS-ASCONTACTS has no `OtherPhoneNumber`-equivalent tag - only Home/Business/Mobile phone numbers exist as
+ * plain single-value tags (plus several Home2/Business2/Car/Radio/Pager/Fax variants this pragmatic subset
+ * doesn't use). A phone tagged `OTHER` in this library's model has nowhere to go and is dropped, documented
+ * here rather than silently - matching `FolderSyncCommand`'s own precedent for this kind of unavoidable
+ * field-count gap. */
 const PHONE_TAG: Partial<Record<ContactAddressKind, string>> = {
     [ContactAddressKind.HOME]: "HomePhoneNumber",
     [ContactAddressKind.WORK]: "BusinessPhoneNumber",
+    [ContactAddressKind.MOBILE]: "MobilePhoneNumber",
 };
+
+/** The `ContactAddressKind`s a postal address can actually have - `MOBILE` is phone-only (see `PHONE_TAG`'s own
+ * doc comment), so the ghosting scan below must not ask `findChild()` for a `MobileStreet`/`MobileCity`/...
+ * tag family that doesn't exist in MS-ASCONTACTS at all. */
+const ADDRESS_KINDS: ContactAddressKind[] = [ContactAddressKind.HOME, ContactAddressKind.WORK, ContactAddressKind.OTHER];
 
 /**
  * Maps `Contact` to/from the EAS `Sync` `Contacts` collection class (MS-ASCONTACTS/MS-ASCNTC2). Contacts are
@@ -129,11 +142,11 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
      *
      * **Phones specifically** also preserve any existing phone of a kind EAS has no tag for at all (see
      * `PHONE_TAG`'s own doc comment - `OTHER`, today) across a rebuild: a real device's Contacts edit UI only
-     * ever sends `HomePhoneNumber`/`BusinessPhoneNumber`, so rebuilding the group from just those two (as every
-     * other ghosted group here rebuilds from exactly what's present) would silently delete a phone number this
-     * protocol simply has no way to round-trip, on the next edit of *any* phone field - discovered live via a
-     * spec audit, not a hypothetical. `existing` is `undefined` only for client-originated `Add`, where there's
-     * nothing to carry forward yet.
+     * ever sends `HomePhoneNumber`/`BusinessPhoneNumber`/`MobilePhoneNumber`, so rebuilding the group from just
+     * those (as every other ghosted group here rebuilds from exactly what's present) would silently delete a
+     * phone number this protocol simply has no way to round-trip, on the next edit of *any* phone field -
+     * discovered live via a spec audit, not a hypothetical. `existing` is `undefined` only for client-originated
+     * `Add`, where there's nothing to carry forward yet.
      */
     public fromApplicationData(el: WbxmlElement, existing?: Contact): Partial<Contact> {
         const partial: Partial<Contact> = {};
@@ -167,8 +180,7 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
             ];
         }
 
-        const addressKinds = Object.values(ContactAddressKind);
-        const touchedKinds = addressKinds.filter((kind) => this.addressTags(kind).some((tag) => findChild(el, tag)));
+        const touchedKinds = ADDRESS_KINDS.filter((kind) => this.addressTags(kind).some((tag) => findChild(el, tag)));
         if (touchedKinds.length > 0) {
             partial.addresses = touchedKinds
                 .map((kind) => this.parseAddress(el, kind))

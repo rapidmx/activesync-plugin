@@ -557,6 +557,51 @@ describe("EmailSyncAdapter Tests", () => {
             expect(labelFind).not.toHaveBeenCalled();
         });
 
+        describe("ReplyTo / LastVerbExecuted", () => {
+            const fieldOf = (el: WbxmlElement, tag: string): string | undefined => el.children.find((c) => c.tag === tag)?.text;
+
+            it("Emits ReplyTo only when the message carries one.", async () => {
+                const { adapter } = buildAdapter();
+                const [withReplyTo] = await adapter.toApplicationDataBatch([{ ...baseMessage, replyTo: "list@example.com" }]);
+                expect(fieldOf(withReplyTo, "ReplyTo")).toBe("list@example.com");
+
+                const [without] = await adapter.toApplicationDataBatch([baseMessage]);
+                expect(fieldOf(without, "ReplyTo")).toBeUndefined();
+            });
+
+            it("Emits LastVerbExecuted 1 (Reply) with LastVerbExecutionTime when answered and stamped.", async () => {
+                const { adapter } = buildAdapter();
+                const [rendered] = await adapter.toApplicationDataBatch([
+                    { ...baseMessage, flags: { ...baseMessage.flags, answered: true, lastVerbExecutedAt: new Date("2026-03-01T12:00:00.000Z") } },
+                ]);
+                expect(fieldOf(rendered, "LastVerbExecuted")).toBe("1");
+                expect(fieldOf(rendered, "LastVerbExecutionTime")).toBe("2026-03-01T12:00:00.000Z");
+            });
+
+            it("Emits LastVerbExecuted 3 (Forward) when forwarded, preferring it over answered when both are set (the single shared timestamp can't tell which was more recent).", async () => {
+                const { adapter } = buildAdapter();
+                const [rendered] = await adapter.toApplicationDataBatch([
+                    { ...baseMessage, flags: { ...baseMessage.flags, answered: true, forwarded: true, lastVerbExecutedAt: new Date("2026-03-01T12:00:00.000Z") } },
+                ]);
+                expect(fieldOf(rendered, "LastVerbExecuted")).toBe("3");
+            });
+
+            it("Emits neither LastVerbExecuted nor LastVerbExecutionTime when answered/forwarded is set but lastVerbExecutedAt is missing (an older row written before the field existed).", async () => {
+                const { adapter } = buildAdapter();
+                const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, flags: { ...baseMessage.flags, answered: true } }]);
+                expect(fieldOf(rendered, "LastVerbExecuted")).toBeUndefined();
+                expect(fieldOf(rendered, "LastVerbExecutionTime")).toBeUndefined();
+            });
+
+            it("Coerces a string lastVerbExecutedAt (the SQL backend's simple-json round-trip) to a real Date before formatting.", async () => {
+                const { adapter } = buildAdapter();
+                const [rendered] = await adapter.toApplicationDataBatch([
+                    { ...baseMessage, flags: { ...baseMessage.flags, answered: true, lastVerbExecutedAt: "2026-03-01T12:00:00.000Z" as any } },
+                ]);
+                expect(fieldOf(rendered, "LastVerbExecutionTime")).toBe("2026-03-01T12:00:00.000Z");
+            });
+        });
+
         const attachmentsOf = (el: WbxmlElement) => el.children.find((child) => child.tag === "Attachments")?.children;
         const meetingRequestOf = (el: WbxmlElement) => el.children.find((child) => child.tag === "MeetingRequest");
 

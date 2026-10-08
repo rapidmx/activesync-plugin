@@ -2320,6 +2320,8 @@ describe("Route:EasRouteMongo Tests", () => {
             const updatedOriginal = await messageRepo.findOne({ uid: original.uid } as any);
             expect(updatedOriginal?.flags.answered).toBe(true);
             expect(updatedOriginal?.flags.forwarded).toBe(false);
+            // Pairs with `answered` so EmailSyncAdapter.render() can emit MS-ASEMAIL2's LastVerbExecuted/LastVerbExecutionTime.
+            expect(updatedOriginal?.flags.lastVerbExecutedAt).toBeTruthy();
 
             const reply = await messageRepo.findOne({ subject: "Re: Test Compose" } as any);
             expect(reply?.inReplyTo).toBe("<original@example.com>");
@@ -2352,6 +2354,7 @@ describe("Route:EasRouteMongo Tests", () => {
             const updatedOriginal = await messageRepo.findOne({ uid: original.uid } as any);
             expect(updatedOriginal?.flags.forwarded).toBe(true);
             expect(updatedOriginal?.flags.answered).toBe(false);
+            expect(updatedOriginal?.flags.lastVerbExecutedAt).toBeTruthy();
         });
 
         it("Returns 404 when Source.ItemId references a message that doesn't exist.", async () => {
@@ -2759,6 +2762,7 @@ describe("Route:EasRouteMongo Tests", () => {
 
                 const updatedOriginal = await messageRepo.findOne({ uid: original.uid } as any);
                 expect(updatedOriginal?.flags.answered).toBe(true);
+                expect(updatedOriginal?.flags.lastVerbExecutedAt).toBeTruthy();
 
                 const reply = await messageRepo.findOne({ subject: "Re: Test Compose (raw)" } as any);
                 expect(reply?.inReplyTo).toBe("<original-raw@example.com>");
@@ -2781,6 +2785,7 @@ describe("Route:EasRouteMongo Tests", () => {
 
                 const updatedOriginal = await messageRepo.findOne({ uid: original.uid } as any);
                 expect(updatedOriginal?.flags.forwarded).toBe(true);
+                expect(updatedOriginal?.flags.lastVerbExecutedAt).toBeTruthy();
             });
 
             it("Returns 404 when the query ItemId references a message that doesn't exist.", async () => {

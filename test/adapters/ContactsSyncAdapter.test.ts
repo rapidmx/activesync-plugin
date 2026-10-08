@@ -93,6 +93,13 @@ describe("ContactsSyncAdapter Tests", () => {
             expect(rendered.children.filter((c) => c.tag.endsWith("PhoneNumber"))).toHaveLength(2);
         });
 
+        it("Renders a MOBILE-kind phone as MobilePhoneNumber.", () => {
+            const contact: Contact = { ...baseContact, phones: [{ type: ContactAddressKind.MOBILE, phoneNumber: "555-4444" }] };
+            const rendered = adapter.toApplicationData(contact);
+            expect(textOf(rendered, "MobilePhoneNumber")).toBe("555-4444");
+            expect(rendered.children.filter((c) => c.tag.endsWith("PhoneNumber"))).toHaveLength(1);
+        });
+
         it("Renders address fields with the kind's own tag prefix, omitting a part that's absent.", () => {
             const contact: Contact = {
                 ...baseContact,
@@ -175,6 +182,17 @@ describe("ContactsSyncAdapter Tests", () => {
             const el = appData([textElement(WbxmlCodePage.Contacts, "HomePhoneNumber", "555-1111")]);
             expect(adapter.fromApplicationData(el).phones).toEqual([
                 { type: ContactAddressKind.HOME, phoneNumber: "555-1111" },
+            ]);
+        });
+
+        it("Parses MobilePhoneNumber into a MOBILE-kind phone, alongside Home/Business.", () => {
+            const el = appData([
+                textElement(WbxmlCodePage.Contacts, "HomePhoneNumber", "555-1111"),
+                textElement(WbxmlCodePage.Contacts, "MobilePhoneNumber", "555-4444"),
+            ]);
+            expect(adapter.fromApplicationData(el).phones).toEqual([
+                { type: ContactAddressKind.HOME, phoneNumber: "555-1111" },
+                { type: ContactAddressKind.MOBILE, phoneNumber: "555-4444" },
             ]);
         });
 

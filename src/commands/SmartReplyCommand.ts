@@ -19,7 +19,14 @@ export abstract class SmartReplyCommand extends ComposeMailCommand {
 
     protected override async markOriginal(ctx: EasCommandContext, original: Message & { uid: string; version: number }): Promise<void> {
         await this.messageRepo!.update(
-            { uid: original.uid, version: original.version, flags: { ...original.flags, answered: true } } as any,
+            {
+                uid: original.uid,
+                version: original.version,
+                // `lastVerbExecutedAt` pairs with `answered` so `EmailSyncAdapter.render()` can emit MS-ASEMAIL2's
+                // `LastVerbExecuted`/`LastVerbExecutionTime` - restapi itself never sets this (see its own doc
+                // comment), so every caller that flips `answered`/`forwarded` true is expected to stamp it.
+                flags: { ...original.flags, answered: true, lastVerbExecutedAt: new Date() },
+            } as any,
             asEntity(this.messageRepo!, original),
             { ignoreACL: true, user: ctx.user },
         );

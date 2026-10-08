@@ -322,15 +322,34 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         const bcc = message.recipients.filter((r) => r.type === RecipientType.BCC).map((r) => r.address);
         const messageClass = message.meetingMethod ? MESSAGE_CLASS_BY_METHOD[message.meetingMethod] : undefined;
 
+        // MS-ASEMAIL2 `LastVerbExecuted`/`LastVerbExecutionTime`: the device's "replied"/"forwarded" icon keys
+        // off this, not `Read`/`Flag` - `Message.flags.answered`/`forwarded` already tracked whether, but with
+        // no timestamp to pair with a verb there was nothing valid to emit. Only one shared timestamp exists
+        // for both booleans (`MessageFlags.lastVerbExecutedAt`'s own doc comment), so when both are set this
+        // can't tell which actually happened more recently - `forwarded` wins the tie, documented here rather
+        // than guessing silently. Reply vs ReplyAll (values 1 vs 2) isn't tracked at all; every reply reports
+        // plain Reply (1).
+        const lastVerb = message.flags.forwarded ? "3" : message.flags.answered ? "1" : undefined;
+
         return element(WbxmlCodePage.AirSync, "ApplicationData", [
             textElement(WbxmlCodePage.Email, "Subject", message.subject),
             textElement(WbxmlCodePage.Email, "From", formatAddress(message.from.address, message.from.displayName)),
             ...(to.length > 0 ? [textElement(WbxmlCodePage.Email, "To", to.join("; "))] : []),
             ...(cc.length > 0 ? [textElement(WbxmlCodePage.Email, "Cc", cc.join("; "))] : []),
             ...(bcc.length > 0 ? [textElement(WbxmlCodePage.Email2, "Bcc", bcc.join("; "))] : []),
+            // MS-ASEMAIL `ReplyTo` - the address a reply should actually go to instead of `From`, e.g. a mailing
+            // list or a no-reply sender. A device building its own reply (every EAS client - the server never
+            // composes one) has no other way to learn this exists.
+            ...(message.replyTo ? [textElement(WbxmlCodePage.Email, "ReplyTo", message.replyTo)] : []),
             textElement(WbxmlCodePage.Email, "DateReceived", message.receivedDate.toISOString()),
             textElement(WbxmlCodePage.Email, "Importance", IMPORTANCE_CODES[message.importance]),
             textElement(WbxmlCodePage.Email, "Read", message.flags.read ? "1" : "0"),
+            ...(lastVerb && message.flags.lastVerbExecutedAt
+                ? [
+                      textElement(WbxmlCodePage.Email2, "LastVerbExecuted", lastVerb),
+                      textElement(WbxmlCodePage.Email2, "LastVerbExecutionTime", new Date(message.flags.lastVerbExecutedAt).toISOString()),
+                  ]
+                : []),
             // MS-ASEMAIL `Flag` is a container: `<Flag><Status>2</Status></Flag>` (active) or an empty `<Flag/>`.
             element(WbxmlCodePage.Email, "Flag", message.flags.flagged ? [textElement(WbxmlCodePage.Email, "FlagStatus", FLAG_STATUS_ACTIVE)] : []),
             // See `MESSAGE_CLASS_BY_METHOD`'s own doc comment: this is the real signal a client keys its
