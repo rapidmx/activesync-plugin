@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta.18] - 2026-10-07
+
+### Added
+- Added defensive fallbacks for a calendar event's organizer and enum-coded fields so a malformed or out-of-range value renders instead of throwing
+- Added temporary diagnostic logging around Sync's raw request size and a composed Draft's decoded Body/Data, to find where a reply's body is actually getting cut off
+- Added temporary diagnostic logging around Ping's requested and watched folders, to find why only Email auto-syncs in the background while Calendar and Contacts need a manual trigger
+
+### Changed
+- Thread a SmartReply to the message it replies to even though the device's own MIME carries no In-Reply-To or References Keep the text, not the markup, of a draft the device composed as HTML in its preview and plain-text MIME Log the size and framing of a received SendMail, SmartReply or SmartForward request
+- Render a Sync collection's server changes before saving its new sync state, so a render failure aborts the round instead of permanently advancing the device's cursor past items it never received
+- Render MS-ASAIRSYNCBASE Attachments for any message with real attachments, and MS-ASEMAIL MeetingRequest for a meeting-invite email, so an ActiveSync client can see attachments and recognize invites
+- Bump @rapidmx/restapi to 0.31.0 to pick up its newly public invite-parsing utilities
+- Fall back instead of throwing when a contact's displayName, emails, phones, or addresses hydrate null, so one malformed contact no longer fails the entire Contacts sync
+- Emit MessageClass for a meeting-invite email, the signal a real EAS client's Accept/Decline UI actually keys off, checked before it ever looks at MeetingRequest's own fields
+- Honor the device's own BodyPreference/TruncationSize when rendering a Sync Email body instead of always sending a fixed short preview, so a client that expects the real body inline no longer sees mail and replies cut off
+- Revert the temporary Sync/Body diagnostic logging - live evidence cleared this server, pointing at a client-side autosave timing race instead
+- Update @rapidmx/restapi to 0.32.0
+- List the Suggested Contacts folder to a device as a user-created Contacts folder, and sync it as Contacts
+
+
 ## [1.0.0-beta.17] - 2026-10-04
 
 ### Changed
@@ -351,7 +371,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.17...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.18...HEAD
+[1.0.0-beta.18]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.17...v1.0.0-beta.18
 [1.0.0-beta.17]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.16...v1.0.0-beta.17
 [1.0.0-beta.16]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.15...v1.0.0-beta.16
 [1.0.0-beta.15]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.14...v1.0.0-beta.15

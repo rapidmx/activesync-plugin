@@ -32,7 +32,7 @@ const FOLDER_TYPE_CODES: Record<FolderType, string> = {
     [FolderType.TASKS]: "7",
     [FolderType.CALENDAR]: "8",
     [FolderType.CONTACTS]: "9",
-    // A second, server-filled contacts folder beside the default one: MS-ASCMD's "user-created contacts folder" (14).
+    // The Suggested Contacts folder is a second address book, so a device lists it as a user-created Contacts folder (14) and syncs it like any other.
     [FolderType.SUGGESTED_CONTACTS]: "14",
     [FolderType.NOTES]: "10",
     [FolderType.JUNK]: "12",
@@ -102,7 +102,10 @@ export abstract class FolderSyncCommand<F extends Folder> implements EasCommandH
             throw new Error("objectFactory is not set.");
         }
         if (!this.folderRepo && this.folderClass) {
-            this.folderRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.folderClass.name, args: [this.folderClass] });
+            this.folderRepo = await this._objectFactory.newInstance(RepoUtils, {
+                name: this.folderClass.name,
+                args: [this.folderClass],
+            });
         }
     }
 
@@ -141,7 +144,13 @@ export abstract class FolderSyncCommand<F extends Folder> implements EasCommandH
             adds = [];
             cursor = epochCursor();
             for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-                const changes = await computeChanges(this.folderRepo, "mailboxUid", ctx.mailboxUid, cursor, this.windowSize);
+                const changes = await computeChanges(
+                    this.folderRepo,
+                    "mailboxUid",
+                    ctx.mailboxUid,
+                    cursor,
+                    this.windowSize,
+                );
                 adds.push(...changes.adds, ...changes.changes);
                 cursor = changes.cursor;
                 if (!changes.moreAvailable) {
@@ -166,7 +175,11 @@ export abstract class FolderSyncCommand<F extends Folder> implements EasCommandH
         const newKey = formatSyncKey({ generation: generation + 1, watermark: cursor.date, uid: cursor.uid });
         // A retry keeps the previous key as it was; a normal round makes the key just consumed the previous one; a
         // restart forgets it.
-        const previous: string | undefined = retry ? previousSyncKey : resolution.kind === "valid" ? clientSyncKey : undefined;
+        const previous: string | undefined = retry
+            ? previousSyncKey
+            : resolution.kind === "valid"
+              ? clientSyncKey
+              : undefined;
         await persistDeviceSyncState(ctx.deviceSyncState, ctx.deviceSyncStateRepo, (current) => {
             const { [FOLDER_HIERARCHY_PREVIOUS_KEY]: _dropped, ...rest } = current.folderSyncKeys ?? {};
             return {
@@ -214,7 +227,11 @@ export abstract class FolderSyncCommand<F extends Folder> implements EasCommandH
             /* v8 ignore next -- unreachable via real data: FOLDER_TYPE_CODES has an entry for every FolderType
                enum value, so the `??` fallback only guards a future enum member added to one without the
                other; `folder.type` can never carry a value outside the enum. */
-            textElement(WbxmlCodePage.FolderHierarchy, "Type", FOLDER_TYPE_CODES[folder.type] ?? FOLDER_TYPE_CODES[FolderType.USER]),
+            textElement(
+                WbxmlCodePage.FolderHierarchy,
+                "Type",
+                FOLDER_TYPE_CODES[folder.type] ?? FOLDER_TYPE_CODES[FolderType.USER],
+            ),
         ]);
     }
 }
