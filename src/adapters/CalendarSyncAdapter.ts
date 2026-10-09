@@ -313,7 +313,13 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
         }
 
         const recurrenceEl = findChild(el, "Recurrence");
-        if (recurrenceEl) {
+        if (recurrenceEl && childText(recurrenceEl, "Type") === undefined) {
+            // A `Recurrence` without a `Type` is how iOS describes an event that doesn't repeat (it sends one on every
+            // Add) - no rule, and on a Change a series made non-repeating loses its rule.
+            if (existing?.recurrenceRule) {
+                partial.recurrenceRule = null as any;
+            }
+        } else if (recurrenceEl) {
             partial.recurrenceRule = {
                 ...this.recurrenceRuleFromElement(recurrenceEl),
                 exceptions: existing?.recurrenceRule?.exceptions ?? [],

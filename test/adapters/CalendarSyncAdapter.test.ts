@@ -197,6 +197,14 @@ describe("CalendarSyncAdapter Tests", () => {
                 expect(adapter.fromApplicationData(appData([])).recurrenceRule).toBeUndefined();
             });
 
+            it("Reads a Recurrence without a Type (iOS's form for an event that doesn't repeat) as no rule, clearing one a Change's event had.", () => {
+                const el = appData([element(WbxmlCodePage.Calendar, "Recurrence", [])]);
+                expect(adapter.fromApplicationData(el)).not.toHaveProperty("recurrenceRule");
+                const series = { recurrenceRule: { freq: RecurrenceFrequency.DAILY, interval: 1, exceptions: [] } } as any;
+                expect(adapter.fromApplicationData(el, series).recurrenceRule).toBeNull();
+                expect(adapter.fromApplicationData(el, {} as any)).not.toHaveProperty("recurrenceRule");
+            });
+
             it("Parses a Daily recurrence with default interval.", () => {
                 const el = appData([element(WbxmlCodePage.Calendar, "Recurrence", [cal("Type", "0")])]);
                 expect(adapter.fromApplicationData(el).recurrenceRule).toEqual({

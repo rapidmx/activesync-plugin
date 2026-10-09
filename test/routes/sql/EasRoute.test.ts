@@ -1796,6 +1796,8 @@ describe("Route:EasRouteSQL Tests", () => {
                                 textElement(WbxmlCodePage.Calendar, "StartTime", "20260301T090000Z"),
                                 textElement(WbxmlCodePage.Calendar, "EndTime", "20260301T093000Z"),
                                 textElement(WbxmlCodePage.Calendar, "OrganizerEmail", "owner@example.com"),
+                                // iOS sends an empty Recurrence on every Add of an event that doesn't repeat.
+                                element(WbxmlCodePage.Calendar, "Recurrence", []),
                             ]),
                         ]),
                     ]),
@@ -1807,6 +1809,7 @@ describe("Route:EasRouteSQL Tests", () => {
 
                 const created = await calendarEventRepo.findOne({ where: { uid: serverId } });
                 expect(created?.title).toBe("New Meeting");
+                expect(created?.recurrenceRule ?? undefined).toBeUndefined();
                 expect(created?.sequence).toBe(0);
                 expect(created?.icalUid).toMatch(/^[0-9a-f-]{36}@eas$/);
             });
