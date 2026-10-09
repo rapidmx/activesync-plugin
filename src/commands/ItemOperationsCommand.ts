@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { simpleParser } from "mailparser";
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
-import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
+import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, NotificationUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import {
     AuditAction,
     AuditLogUtils,
@@ -13,6 +13,7 @@ import {
     boundIndexedValue,
     hasMailAccess,
     RecoverableRepoUtils,
+    refreshFolderCounts,
     type Attachment,
     type Folder,
     type FolderType,
@@ -25,6 +26,7 @@ import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.
 import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
 import { truncateUtf8 } from "../MimeHeaderUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
+import { EasLiveUpdates } from "../EasLiveUpdates.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Caps how many messages `emptyFolderContents`/`moveConversation` process per backing `find()`/delete-batch
@@ -105,6 +107,9 @@ interface FetchResult {
  * `EmptyFolderContents` records one `MESSAGE_DELETE` entry per delete batch, listing the deleted message uids
  * (`EasAuditLog`).
  *
+ * Every message `EmptyFolderContents` deletes or `Move` moves is published to an open web client (`EasLiveUpdates`),
+ * and the affected folders' counts are refreshed, as restapi's own message writes do.
+ *
  * `folderClass`/`messageClass`/`attachmentClass`/`mailboxClass`/`auditLogClass` are supplied by the Mongo/SQL concrete
  * subclasses.
  *
@@ -140,6 +145,9 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
+
+    @Inject(NotificationUtils)
+    private notificationUtils?: NotificationUtils;
 
     @Config("mail:eas:itemoperations_max_fetch", 25)
     private maxFetchesPerRequest: number = 25;
@@ -416,6 +424,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
                 try {
                     await this.messageRepo!.delete(message.uid, { ignoreACL: true, user: ctx.user });
                     deletedUids.push(message.uid);
+                    new EasLiveUpdates(this.notificationUtils).deleted(folderUid, this.messageClass.name, message.uid);
                 } catch {
                     failed.add(message.uid);
                 }
@@ -434,6 +443,9 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
             }
         }
 
+        if (deleted > 0) {
+            await this.refreshCounts([folderUid]);
+        }
         const status: string = complete && failed.size === 0 ? "1" : deleted === 0 ? STATUS_SERVER_ERROR : STATUS_PARTIAL;
         return element(WbxmlCodePage.ItemOperations, "EmptyFolderContents", [textElement(WbxmlCodePage.ItemOperations, "Status", status)]);
     }
@@ -488,6 +500,7 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
             messages.map((message) => hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, message.folderUid, ACLAction.UPDATE)),
         );
         const folderTypes = new Map<string, FolderType | undefined>();
+        const touched = new Set<string>();
         let moved = 0;
         let failed = 0;
         for (let i = 0; i < messages.length; i++) {
@@ -505,11 +518,13 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
                 continue;
             }
             try {
-                await this.messageRepo!.update(
+                const updated = await this.messageRepo!.update(
                     { uid: (message as any).uid, version: (message as any).version, folderUid: dstFldId, ...plan.patch } as any,
                     asEntity(this.messageRepo!, message),
                     { ignoreACL: true, user: ctx.user },
                 );
+                new EasLiveUpdates(this.notificationUtils).moved(message.folderUid, this.messageClass.name, updated);
+                touched.add(message.folderUid);
                 moved++;
             } catch {
                 failed++;
@@ -518,12 +533,22 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         if (moved === 0) {
             return this.moveResponse("3");
         }
+        await this.refreshCounts([...touched, dstFldId]);
 
         return element(WbxmlCodePage.ItemOperations, "Move", [
             textElement(WbxmlCodePage.ItemOperations, "Status", failed > 0 ? STATUS_PARTIAL : "1"),
             textElement(WbxmlCodePage.ItemOperations, "DstFldId", dstFldId),
             opaqueElement(WbxmlCodePage.ItemOperations, "ConversationId", conversationIdEl.opaque),
         ]);
+    }
+
+    /** Recomputes, stores and publishes the counts of folders whose messages this request deleted or moved (restapi's
+     * `refreshFolderCounts()`, as its own message writes do). Never throws. */
+    private async refreshCounts(folderUids: Iterable<string>): Promise<void> {
+        await refreshFolderCounts(
+            { messageRepo: this.messageRepo!, folderRepo: this.folderRepo!, folderClass: this.folderClass, notificationUtils: this.notificationUtils, logger: this.logger },
+            folderUids,
+        );
     }
 
     private moveResponse(status: string): WbxmlElement {

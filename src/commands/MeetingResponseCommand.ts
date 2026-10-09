@@ -5,7 +5,7 @@
 import * as crypto from "crypto";
 import { simpleParser } from "mailparser";
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
-import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
+import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ModelUtils, NotificationUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import {
@@ -21,11 +21,13 @@ import {
     type Message,
     parseIcsEvent,
     RecoverableRepoUtils,
+    redactEventForReader,
     type TransportResult,
 } from "@rapidmx/restapi";
 import { ensureCalendarOccurrence, isOrganizedBy } from "../adapters/CalendarSyncAdapter.js";
 import { fromCompactDateTime } from "../CompactDateTime.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
+import { EasLiveUpdates } from "../EasLiveUpdates.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** MS-ASCMD `UserResponse`: 1=Accepted, 2=Tentatively accepted, 3=Declined. */
@@ -90,6 +92,9 @@ type StoredEvent = CalendarEvent & { uid: string; version: number };
  * handling uses - so a response to a single occurrence records against (and, for a first response, creates)
  * that occurrence's own row rather than the whole series.
  *
+ * The recorded response (the updated event, or its deletion on a decline) is published to an open web client
+ * (`EasLiveUpdates`), a private event as its busy block, as restapi's calendar route does.
+ *
  * `calendarEventClass`/`mailboxClass`/`messageClass` are supplied by the Mongo/SQL concrete subclasses.
  *
  * @author Jean-Philippe Steinmetz
@@ -110,6 +115,9 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
+
+    @Inject(NotificationUtils)
+    private notificationUtils?: NotificationUtils;
 
     @Inject("BlobStore")
     private blobStore?: BlobStore;
@@ -226,15 +234,18 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
                 }
                 await this.calendarEventRepo!.delete(event.uid, { ignoreACL: true, user: ctx.user });
                 removed = true;
+                new EasLiveUpdates(this.notificationUtils).deleted(event.folderUid, this.calendarEventClass.name, event.uid);
             } else {
                 const attendees = event.attendees.map((attendee, i) => (i === attendeeIndex ? updatedAttendee : attendee));
                 const inviteSequence =
                     attendeeCopy && event.inviteSequenceSent !== event.sequence ? { inviteSequenceSent: event.sequence ?? 0 } : {};
-                await this.calendarEventRepo!.update(
+                const updated = await this.calendarEventRepo!.update(
                     { uid: event.uid, version: event.version, attendees, ...inviteSequence } as any,
                     asEntity(this.calendarEventRepo!, event),
                     { ignoreACL: true, user: ctx.user },
                 );
+                // A private event's busy block, as restapi's calendar route publishes it (see `EasLiveUpdates`).
+                new EasLiveUpdates(this.notificationUtils).publish(event.folderUid, this.calendarEventClass.name, "update", redactEventForReader(updated));
             }
         } catch (err: any) {
             this.logger?.warn(`MeetingResponseCommand: failed to record response to event ${event.uid}: ${err?.message}`);

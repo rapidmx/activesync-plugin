@@ -437,6 +437,127 @@ describe("MeetingResponseCommand Tests (isolated)", () => {
         });
     });
 
+    describe("Live updates (EasLiveUpdates) on the event's folder channel", () => {
+        /** The row `calendarEventRepo.update` saves for `event()` with the caller's response recorded. */
+        const saved = (responseStatus: AttendeeResponseStatus, overrides: Record<string, any> = {}) =>
+            event({
+                version: 2,
+                inviteSequenceSent: 0,
+                location: "Room 4",
+                description: "Quarterly planning",
+                attendees: [{ address: "me@example.com", role: AttendeeRole.REQUIRED, responseStatus, isOrganizer: false }],
+                ...overrides,
+            });
+
+        it("Publishes a delete naming only the event when a decline removes it.", async () => {
+            const { command, calendarEventRepo } = build();
+            const sendMessage = vi.fn();
+            (command as any).notificationUtils = { sendMessage };
+
+            expect(statuses(await command.handle(ctx(request(reply("3", "event-1")))))).toEqual(["1"]);
+
+            expect(calendarEventRepo.delete).toHaveBeenCalled();
+            expect(sendMessage).toHaveBeenCalledTimes(1);
+            expect(sendMessage).toHaveBeenCalledWith("calendar", "CalendarEventMongo", "delete", { uid: "event-1" });
+        });
+
+        it("Publishes the saved row as an update when a response is recorded (accept, or a decline without DELETE).", async () => {
+            const accepted = saved(AttendeeResponseStatus.ACCEPTED);
+            const calendarEventRepo = { findOne: vi.fn().mockResolvedValue(event()), update: vi.fn().mockResolvedValue(accepted), delete: vi.fn() };
+            const { command } = build({ calendarEventRepo });
+            const sendMessage = vi.fn();
+            (command as any).notificationUtils = { sendMessage };
+
+            expect(statuses(await command.handle(ctx(request(reply("1", "event-1")))))).toEqual(["1"]);
+
+            expect(sendMessage).toHaveBeenCalledTimes(1);
+            expect(sendMessage).toHaveBeenCalledWith("calendar", "CalendarEventMongo", "update", accepted);
+            // A public event is published as saved, not redacted.
+            expect(sendMessage.mock.calls[0][3]).toBe(accepted);
+            expect(sendMessage.mock.calls[0][3]).not.toHaveProperty("redacted");
+
+            // A decline the caller may not delete is recorded (and published) as an update too.
+            const declined = saved(AttendeeResponseStatus.DECLINED);
+            const editOnly = build({
+                calendarEventRepo: { findOne: vi.fn().mockResolvedValue(event()), update: vi.fn().mockResolvedValue(declined), delete: vi.fn() },
+                aclUtils: { hasPermission: vi.fn().mockImplementation(async (_u: any, _f: any, action: string) => action !== "delete") },
+            });
+            const editOnlySend = vi.fn();
+            (editOnly.command as any).notificationUtils = { sendMessage: editOnlySend };
+
+            expect(statuses(await editOnly.command.handle(ctx(request(reply("3", "event-1")))))).toEqual(["1"]);
+
+            expect(editOnly.calendarEventRepo.delete).not.toHaveBeenCalled();
+            expect(editOnlySend).toHaveBeenCalledTimes(1);
+            expect(editOnlySend).toHaveBeenCalledWith("calendar", "CalendarEventMongo", "update", declined);
+        });
+
+        it("Publishes a private event's update as restapi's redacted busy block, never its details.", async () => {
+            const privateRow = saved(AttendeeResponseStatus.TENTATIVE, { visibility: "private" });
+            const calendarEventRepo = {
+                findOne: vi.fn().mockResolvedValue(event({ visibility: "private" })),
+                update: vi.fn().mockResolvedValue(privateRow),
+                delete: vi.fn(),
+            };
+            const { command } = build({ calendarEventRepo });
+            const sendMessage = vi.fn();
+            (command as any).notificationUtils = { sendMessage };
+
+            expect(statuses(await command.handle(ctx(request(reply("2", "event-1")))))).toEqual(["1"]);
+
+            expect(sendMessage).toHaveBeenCalledTimes(1);
+            const [channel, type, action, payload] = sendMessage.mock.calls[0];
+            expect([channel, type, action]).toEqual(["calendar", "CalendarEventMongo", "update"]);
+            expect(payload).toMatchObject({
+                uid: "event-1",
+                version: 2,
+                folderUid: "calendar",
+                visibility: "private",
+                title: "Busy",
+                attendees: [],
+                organizer: { address: "", type: RecipientType.TO },
+                redacted: true,
+                startDate: privateRow.startDate,
+                endDate: privateRow.endDate,
+            });
+            for (const field of ["location", "description", "inviteSequenceSent"]) {
+                expect(payload).not.toHaveProperty(field);
+            }
+            // The saved row itself is left untouched.
+            expect(privateRow.title).toBe("Planning");
+            expect(privateRow).not.toHaveProperty("redacted");
+        });
+
+        it("Publishes nothing when recording the response fails.", async () => {
+            for (const userResponse of ["1", "3"]) {
+                const calendarEventRepo = {
+                    findOne: vi.fn().mockResolvedValue(event()),
+                    update: vi.fn().mockRejectedValue(new Error("conflict")),
+                    delete: vi.fn().mockRejectedValue(new Error("conflict")),
+                };
+                const { command } = build({ calendarEventRepo });
+                const sendMessage = vi.fn();
+                (command as any).notificationUtils = { sendMessage };
+
+                expect(statuses(await command.handle(ctx(request(reply(userResponse, "event-1")))))).toEqual(["3"]);
+                expect(sendMessage).not.toHaveBeenCalled();
+            }
+
+            // An already-stamped copy whose delete fails publishes no delete either.
+            const stamped = build({
+                calendarEventRepo: {
+                    findOne: vi.fn().mockResolvedValue(event({ cancelNoticeSentAt: new Date() })),
+                    update: vi.fn(),
+                    delete: vi.fn().mockRejectedValue(new Error("gone")),
+                },
+            });
+            const sendMessage = vi.fn();
+            (stamped.command as any).notificationUtils = { sendMessage };
+            expect(statuses(await stamped.command.handle(ctx(request(reply("3", "event-1")))))).toEqual(["3"]);
+            expect(sendMessage).not.toHaveBeenCalled();
+        });
+    });
+
     describe("Trusted-role (admin) bypass regression - a trusted role must never substitute for a real ACL grant", () => {
         it("A trusted-role stranger with no grant on the event's folder gets Status 2 - UPDATE isn't substituted by the role.", async () => {
             const aclUtils = fakeMailAclUtils({});

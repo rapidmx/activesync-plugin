@@ -186,6 +186,64 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
             expect(statusOf(await command.handle(adminCtx))).toBe("3");
             expect(messageRepo.update).not.toHaveBeenCalled();
         });
+
+        /** `build()` plus a recording `notificationUtils` and a stubbed `refreshCounts()` (restapi's `refreshFolderCounts()`). */
+        function buildLive(rows: any[], failing: Set<string>) {
+            const built = build(rows, failing);
+            const sendMessage = vi.fn();
+            built.command.notificationUtils = { sendMessage };
+            const refreshCounts = vi.spyOn(built.command, "refreshCounts").mockResolvedValue(undefined);
+            return { ...built, sendMessage, refreshCounts };
+        }
+
+        it("EmptyFolderContents publishes a delete on the folder's channel per deleted message and refreshes the folder's counts.", async () => {
+            const { command, sendMessage, refreshCounts } = buildLive(messages(3), new Set(["m1"]));
+
+            expect(emptyStatus(await command.handle(ctx(empty())))).toBe("17");
+            expect(sendMessage.mock.calls).toEqual([
+                ["f1", "MessageMongo", "delete", { uid: "m0" }],
+                ["f1", "MessageMongo", "delete", { uid: "m2" }],
+            ]);
+            expect(refreshCounts).toHaveBeenCalledTimes(1);
+            expect([...refreshCounts.mock.calls[0][0]]).toEqual(["f1"]);
+        });
+
+        it("EmptyFolderContents publishes nothing and refreshes no counts when nothing could be deleted.", async () => {
+            const { command, sendMessage, refreshCounts } = buildLive(messages(2), new Set(["m0", "m1"]));
+
+            expect(emptyStatus(await command.handle(ctx(empty())))).toBe("3");
+            expect(sendMessage).not.toHaveBeenCalled();
+            expect(refreshCounts).not.toHaveBeenCalled();
+        });
+
+        it("Move publishes an update on the destination and a delete on the source per moved message, and refreshes every touched folder's counts.", async () => {
+            const rows = [
+                { uid: "a", version: 1, folderUid: "f1", mailboxUid: "mbx", conversationId: "conv" },
+                { uid: "b", version: 1, folderUid: "f2", mailboxUid: "mbx", conversationId: "conv" },
+                { uid: "c", version: 1, folderUid: "f3", mailboxUid: "mbx", conversationId: "conv" },
+            ];
+            const { command, sendMessage, refreshCounts } = buildLive(rows, new Set(["c"]));
+            command.batchSize = 3;
+
+            expect(statusOf(await command.handle(ctx(moveTo("conv"))))).toBe("17");
+            expect(sendMessage.mock.calls).toEqual([
+                ["dest", "MessageMongo", "update", { uid: "a", version: 1, folderUid: "dest" }],
+                ["f1", "MessageMongo", "delete", { uid: "a" }],
+                ["dest", "MessageMongo", "update", { uid: "b", version: 1, folderUid: "dest" }],
+                ["f2", "MessageMongo", "delete", { uid: "b" }],
+            ]);
+            // The failed message's folder is untouched, so its counts aren't refreshed.
+            expect(refreshCounts).toHaveBeenCalledTimes(1);
+            expect([...refreshCounts.mock.calls[0][0]]).toEqual(["f1", "f2", "dest"]);
+        });
+
+        it("Move publishes nothing and refreshes no counts when no message could be moved.", async () => {
+            const { command, sendMessage, refreshCounts } = buildLive(messages(2), new Set(["m0", "m1"]));
+
+            expect(statusOf(await command.handle(ctx(moveTo("conv"))))).toBe("3");
+            expect(sendMessage).not.toHaveBeenCalled();
+            expect(refreshCounts).not.toHaveBeenCalled();
+        });
     });
 
     describe("Round 6: audit of non-owner access", () => {

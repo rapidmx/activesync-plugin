@@ -5,7 +5,7 @@
 import * as crypto from "crypto";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
-import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
+import { ACLAction, ACLUtils, ApiErrorMessages, ApiErrors, NotificationUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { ScanPipeline } from "@rapidmx/restapi/scan";
 import {
     applyThreadHeaders,
@@ -20,12 +20,14 @@ import {
     prependHeaders,
     RecipientType,
     RecoverableRepoUtils,
+    refreshFolderCounts,
     scanAndRelay,
 } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { checkComposedOriginators, extractOriginatorHeaders, stripHeader } from "../MimeHeaderUtils.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
+import { EasLiveUpdates } from "../EasLiveUpdates.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Most envelope recipients (To + Cc + Bcc) one composed message may carry. */
@@ -109,6 +111,9 @@ export { stripHeader };
  * - Attachments present in the composed MIME are relayed correctly but are not additionally persisted as
  * `Attachment` records on the saved Sent Items copy (`Message.hasAttachments` is still set).
  *
+ * The Sent Items copy and the original's flag change are published to an open web client (`EasLiveUpdates`), and Sent
+ * Items' counts refreshed, as restapi's own message writes do.
+ *
  * `folderClass`/`messageClass`/`mailboxClass` are supplied by the Mongo/SQL concrete subclasses, and
  * `markOriginal()` by the `SmartForwardCommand`/`SmartReplyCommand` subclasses.
  *
@@ -141,6 +146,9 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
 
+    @Inject(NotificationUtils)
+    private notificationUtils?: NotificationUtils;
+
     /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
      * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
     @Config("trusted_roles", ["admin"])
@@ -166,10 +174,11 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
     }
 
     /** Called once the outgoing message has been sent, only when the request carried a `<Source>` the caller may
-     * update - flips the referenced original message's own `Answered`/`Forwarded` flag. A no-op here; overridden by
-     * the two subclasses that need it. */
-    protected async markOriginal(_ctx: EasCommandContext, _original: Message & { uid: string }): Promise<void> {
+     * update - flips the referenced original message's own `Answered`/`Forwarded` flag, returning it as saved. A no-op
+     * here; overridden by the two subclasses that need it. */
+    protected async markOriginal(_ctx: EasCommandContext, _original: Message & { uid: string }): Promise<(Message & { uid: string }) | undefined> {
         // No-op by default (plain SendMail has nothing to flag).
+        return undefined;
     }
 
     /** Whether the message is a reply to its `<Source>`: it is then threaded to it (`In-Reply-To`/`References`, which a device's own
@@ -291,7 +300,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
                 ctx.user,
             );
 
-            await this.messageRepo.create(
+            const sentCopy = await this.messageRepo.create(
                 new this.messageClass({
                     folderUid: sentFolder.uid,
                     mailboxUid: ctx.mailboxUid,
@@ -318,13 +327,21 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
                 } as any),
                 { ignoreACL: true, user: ctx.user },
             );
+            new EasLiveUpdates(this.notificationUtils).publish(sentFolder.uid, this.messageClass.name, "create", sentCopy);
+            await refreshFolderCounts(
+                { messageRepo: this.messageRepo, folderRepo: this.folderRepo, folderClass: this.folderClass, notificationUtils: this.notificationUtils, logger: this.logger },
+                [sentFolder.uid],
+            );
         }
 
         if (original) {
             // The message is already on its way - flagging the original is best-effort bookkeeping.
             try {
                 if (await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, original.folderUid, ACLAction.UPDATE)) {
-                    await this.markOriginal(ctx, original);
+                    const marked = await this.markOriginal(ctx, original);
+                    if (marked) {
+                        new EasLiveUpdates(this.notificationUtils).publish(marked.folderUid, this.messageClass.name, "update", marked);
+                    }
                 }
             } catch (err: any) {
                 this.logger?.warn(`${this.command}: failed to flag original message ${original.uid}: ${err?.message}`);

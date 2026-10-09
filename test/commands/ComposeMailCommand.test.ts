@@ -7,16 +7,20 @@
 // test/routes/BaseEasRoute.test.ts and test/eas/commands/FolderSyncCommand.test.ts already use for their own
 // guard clauses. Every real SendMail/SmartForward/SmartReply behavior (relay, Sent Items persistence, Source
 // resolution/threading, original-message flag flips, spam/transport rejection) is exercised via real HTTP+DB
-// requests in test/routes/{mongo,sql}/EasRoute.test.ts.
+// requests in test/routes/{mongo,sql}/EasRoute.test.ts. The "live updates" block below additionally pins, with fakes,
+// exactly which live-update notifications a send publishes.
 import config from "../config.js";
 import { ObjectFactory } from "@rapidrest/service-core";
 import { Logger } from "@rapidrest/core";
+import { FolderMongo, MessageMongo } from "@rapidmx/restapi/mongo";
 import { SendMailCommandMongo } from "../../src/commands/mongo/SendMailCommandMongo.js";
+import { SmartForwardCommandMongo } from "../../src/commands/mongo/SmartForwardCommandMongo.js";
+import { SmartReplyCommandMongo } from "../../src/commands/mongo/SmartReplyCommandMongo.js";
 import { stripHeader } from "../../src/commands/ComposeMailCommand.js";
 import { childText, element, opaqueElement, textElement } from "../../src/codec/WbxmlElement.js";
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import type { EasCommandContext } from "../../src/EasCommandHandler.js";
-import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
+import { fakeMailAclUtils, OWNER_USER, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
 
 describe("ComposeMailCommand Tests (guard clauses only)", () => {
     const objectFactory = new ObjectFactory(config, Logger());
@@ -282,6 +286,170 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
             ).rejects.toMatchObject({ status: 403 });
             expect(send).not.toHaveBeenCalled();
         });
+    });
+
+    // The Sent Items copy and the original's flag flip are published to an open web client (`EasLiveUpdates`), and Sent
+    // Items' counts refreshed (restapi's `refreshFolderCounts()`), exactly as restapi's own message writes do. Every
+    // dependency is a fake (the real relay/persistence path is covered end to end by test/routes/{mongo,sql}/EasRoute.test.ts),
+    // so these pin exactly what is published, on which channel, with which payload.
+    describe("live updates", () => {
+        const SENT_FOLDER = { uid: "sent-1", mailboxUid: "mbx", type: "sent_items", version: 3, unreadCount: 0, totalCount: 4 };
+        const ORIGINAL = {
+            uid: "orig-1",
+            version: 7,
+            folderUid: "inbox",
+            mailboxUid: "mbx",
+            messageId: "orig@example.com",
+            references: [] as string[],
+            flags: { read: true, flagged: false, answered: false, forwarded: false },
+        };
+
+        /** A command whose every dependency is a fake that behaves like the real one: `messageRepo.create`/`update`
+         * return the saved row (with a uid/version as the repo assigns them), `folderRepo` holds the Sent Items folder,
+         * and the message repo's grouped count query reports Sent Items' derived counts. */
+        const build = (commandClass: any, grants: Record<string, Record<string, string[]>> = { inbox: { [OWNER_USER.uid]: ["read", "update"] } }) => {
+            const command = objectFactory.newInstance<any>(commandClass, { initialize: false });
+            const sendMessage = vi.fn();
+            const countRows = [{ _id: SENT_FOLDER.uid, unreadCount: "0", totalCount: "5" }];
+            const queryBuilder: any = {};
+            for (const method of ["select", "addSelect", "where", "andWhere", "groupBy", "setParameter"]) {
+                queryBuilder[method] = vi.fn(() => queryBuilder);
+            }
+            queryBuilder.getRawMany = vi.fn(async () => countRows);
+            const messageRepo = {
+                repo: { createQueryBuilder: vi.fn(() => queryBuilder) },
+                findOne: vi.fn(async (uid: string) => (uid === ORIGINAL.uid ? { ...ORIGINAL, flags: { ...ORIGINAL.flags } } : undefined)),
+                create: vi.fn(async (obj: any) => ({ ...obj, uid: "sent-copy-1", version: 0, dateCreated: new Date() })),
+                update: vi.fn(async (obj: any, existing: any) => ({ ...existing, ...obj, version: existing.version + 1 })),
+            };
+            const folderRepo = {
+                find: vi.fn(async () => [{ ...SENT_FOLDER }]),
+                findOne: vi.fn(async (uid: string) => (uid === SENT_FOLDER.uid ? { ...SENT_FOLDER } : undefined)),
+                update: vi.fn(async (obj: any, existing: any) => ({ ...existing, ...obj, version: existing.version + 1 })),
+            };
+            const send = vi.fn(async (msg: any) => ({ accepted: msg.envelopeTo, rejected: [] }));
+            Object.assign(command, {
+                folderRepo,
+                messageRepo,
+                mailboxRepo: { findOne: vi.fn().mockResolvedValue({ primarySmtpAddress: "me@example.com", aliasAddresses: [] }) },
+                blobStore: { put: vi.fn(async () => undefined) },
+                mailTransport: { name: "fake", send },
+                scanPipeline: {
+                    run: vi.fn(async () => ({
+                        spam: { verdict: "clean", symbols: [] },
+                        av: { verdict: "clean" },
+                        references: [],
+                        inReplyTo: undefined,
+                        encrypted: false,
+                    })),
+                },
+                aclUtils: fakeMailAclUtils(grants),
+            });
+            command.notificationUtils = { sendMessage };
+            return { command, sendMessage, messageRepo, folderRepo, send };
+        };
+
+        const mime = Buffer.from(["From: me@example.com", "To: you@example.com", "Subject: Hi", "", "Body"].join("\r\n"));
+        const ctx = (query: Record<string, string>) => ({ mailboxUid: "mbx", user: OWNER_USER, req: { rawBody: mime, headers: {} } as any, query });
+
+        it("SendMail publishes the saved Sent Items copy as a create on Sent Items' channel, then Sent Items' refreshed counts.", async () => {
+            const { command, sendMessage, messageRepo, folderRepo } = build(SendMailCommandMongo);
+
+            expect(await command.handle(ctx({ SaveInSentItems: "" }))).toBeUndefined();
+
+            const sentCopy = await messageRepo.create.mock.results[0].value;
+            expect(sentCopy.uid).toBe("sent-copy-1");
+            expect(sendMessage).toHaveBeenCalledTimes(2);
+            expect(sendMessage).toHaveBeenNthCalledWith(1, SENT_FOLDER.uid, MessageMongo.name, "create", sentCopy);
+            // `refreshFolderCounts()` stores the derived counts and publishes them on the folder's and the mailbox's channels.
+            expect(folderRepo.update).toHaveBeenCalledWith(
+                expect.objectContaining({ uid: SENT_FOLDER.uid, version: SENT_FOLDER.version, unreadCount: 0, totalCount: 5 }),
+                expect.anything(),
+                expect.objectContaining({ skipPush: true }),
+            );
+            expect(sendMessage).toHaveBeenNthCalledWith(2, [SENT_FOLDER.uid, "mbx"], FolderMongo.name, "update", {
+                uid: SENT_FOLDER.uid,
+                mailboxUid: "mbx",
+                unreadCount: 0,
+                totalCount: 5,
+            });
+            // Plain SendMail has no original to flag.
+            expect(messageRepo.update).not.toHaveBeenCalled();
+        });
+
+        it("Publishes nothing when SaveInSentItems is off and there is no original to flag.", async () => {
+            const { command, sendMessage, messageRepo, send } = build(SendMailCommandMongo);
+
+            expect(await command.handle(ctx({}))).toBeUndefined();
+
+            expect(send).toHaveBeenCalledTimes(1);
+            expect(messageRepo.create).not.toHaveBeenCalled();
+            expect(sendMessage).not.toHaveBeenCalled();
+        });
+
+        it("SendMail with an ItemId publishes only the Sent Items copy - its markOriginal() flags nothing, so no update is published.", async () => {
+            const { command, sendMessage, messageRepo } = build(SendMailCommandMongo);
+
+            await command.handle(ctx({ SaveInSentItems: "", ItemId: ORIGINAL.uid }));
+
+            expect(messageRepo.update).not.toHaveBeenCalled();
+            expect(sendMessage.mock.calls.map((call) => [call[1], call[2]])).toEqual([
+                [MessageMongo.name, "create"],
+                [FolderMongo.name, "update"],
+            ]);
+        });
+
+        for (const [name, commandClass, flag] of [
+            ["SmartReply", SmartReplyCommandMongo, "answered"],
+            ["SmartForward", SmartForwardCommandMongo, "forwarded"],
+        ] as const) {
+            it(`${name} publishes the Sent Items copy, Sent Items' counts, and the flagged original as an update on its own folder's channel.`, async () => {
+                const { command, sendMessage, messageRepo } = build(commandClass);
+
+                expect(await command.handle(ctx({ SaveInSentItems: "", ItemId: ORIGINAL.uid }))).toBeUndefined();
+
+                const sentCopy = await messageRepo.create.mock.results[0].value;
+                const marked = await messageRepo.update.mock.results[0].value;
+                expect(marked).toMatchObject({ uid: ORIGINAL.uid, folderUid: "inbox", version: ORIGINAL.version + 1, flags: { [flag]: true } });
+                expect(sendMessage).toHaveBeenCalledTimes(3);
+                expect(sendMessage).toHaveBeenNthCalledWith(1, SENT_FOLDER.uid, MessageMongo.name, "create", sentCopy);
+                expect(sendMessage).toHaveBeenNthCalledWith(2, [SENT_FOLDER.uid, "mbx"], FolderMongo.name, "update", expect.objectContaining({ totalCount: 5 }));
+                expect(sendMessage).toHaveBeenNthCalledWith(3, "inbox", MessageMongo.name, "update", marked);
+            });
+
+            it(`${name} without SaveInSentItems publishes only the flagged original.`, async () => {
+                const { command, sendMessage, messageRepo } = build(commandClass);
+
+                await command.handle(ctx({ ItemId: ORIGINAL.uid }));
+
+                expect(messageRepo.create).not.toHaveBeenCalled();
+                const marked = await messageRepo.update.mock.results[0].value;
+                expect(sendMessage).toHaveBeenCalledTimes(1);
+                expect(sendMessage).toHaveBeenCalledWith("inbox", MessageMongo.name, "update", marked);
+            });
+
+            it(`${name} publishes no update for the original when the caller may not update it.`, async () => {
+                const { command, sendMessage, messageRepo } = build(commandClass, { inbox: { [OWNER_USER.uid]: ["read"] } });
+
+                await command.handle(ctx({ SaveInSentItems: "", ItemId: ORIGINAL.uid }));
+
+                expect(messageRepo.update).not.toHaveBeenCalled();
+                expect(sendMessage.mock.calls.map((call) => [call[1], call[2]])).toEqual([
+                    [MessageMongo.name, "create"],
+                    [FolderMongo.name, "update"],
+                ]);
+            });
+
+            it(`${name} publishes no update for the original when flagging it fails, and still succeeds.`, async () => {
+                const { command, sendMessage, messageRepo } = build(commandClass);
+                messageRepo.update.mockRejectedValueOnce(new Error("version conflict"));
+
+                expect(await command.handle(ctx({ ItemId: ORIGINAL.uid }))).toBeUndefined();
+
+                expect(messageRepo.update).toHaveBeenCalledTimes(1);
+                expect(sendMessage).not.toHaveBeenCalled();
+            });
+        }
     });
 
     describe("stripHeader", () => {

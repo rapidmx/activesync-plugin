@@ -17,8 +17,11 @@ export abstract class SmartReplyCommand extends ComposeMailCommand {
     public readonly command = "SmartReply";
     protected override readonly threadsToOriginal: boolean = true;
 
-    protected override async markOriginal(ctx: EasCommandContext, original: Message & { uid: string; version: number }): Promise<void> {
-        await this.messageRepo!.update(
+    protected override async markOriginal(
+        ctx: EasCommandContext,
+        original: Message & { uid: string; version: number },
+    ): Promise<(Message & { uid: string }) | undefined> {
+        return await this.messageRepo!.update(
             {
                 uid: original.uid,
                 version: original.version,

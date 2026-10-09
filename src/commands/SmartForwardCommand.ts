@@ -16,8 +16,11 @@ import { asEntity, type Message } from "@rapidmx/restapi";
 export abstract class SmartForwardCommand extends ComposeMailCommand {
     public readonly command = "SmartForward";
 
-    protected override async markOriginal(ctx: EasCommandContext, original: Message & { uid: string; version: number }): Promise<void> {
-        await this.messageRepo!.update(
+    protected override async markOriginal(
+        ctx: EasCommandContext,
+        original: Message & { uid: string; version: number },
+    ): Promise<(Message & { uid: string }) | undefined> {
+        return await this.messageRepo!.update(
             {
                 uid: original.uid,
                 version: original.version,

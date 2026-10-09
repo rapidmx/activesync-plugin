@@ -42,6 +42,7 @@ import { type ChunkStore, clearHeldSet, type HeldSet, INLINE_HELD_LIMIT, loadHel
 import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
 import { EasCollectionLease, type LeaseRelease } from "../EasCollectionLease.js";
 import { EasAuditLog } from "../EasAuditLog.js";
+import { EasLiveUpdates, type LiveUpdateAction } from "../EasLiveUpdates.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "../adapters/EasCollectionSyncAdapter.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
@@ -684,22 +685,16 @@ export abstract class SyncCommand implements EasCommandHandler {
     }
 
     /**
-     * Publishes a device's write on the channel of the folder holding the item, exactly as restapi's own REST routes
-     * (`BaseScopedChildRoute.notify()`) do - the channel a web client viewing that folder is subscribed to. Without
-     * this, `RepoUtils` publishes only on the item's own uid, which nothing subscribes to, so an event created on a
-     * phone never appeared in an open web client until it reloaded. The payload is `adapter.pushPayload()`'s (a
-     * private event's busy block), or a deleted item's `{ uid }`. An `Email` write also marks its folder's counts for
-     * `refreshCounts()`. Fire-and-forget, like restapi's: never fails the command.
+     * Publishes a device's write on the channel of the folder holding the item (`EasLiveUpdates`). The payload is
+     * `adapter.pushPayload()`'s (a private event's busy block), or a deleted item's `{ uid }`. An `Email` write also
+     * marks its folder's counts for `refreshCounts()`.
      */
-    private publishWrite(round: CollectionRound, action: "create" | "update" | "delete", item: { uid: string }, folderUid: string = round.folder.uid): void {
+    private publishWrite(round: CollectionRound, action: LiveUpdateAction, item: { uid: string }, folderUid: string = round.folder.uid): void {
         if (round.collectionClass === "Email") {
             round.countedFolders.add(folderUid);
         }
-        if (!this.notificationUtils) {
-            return;
-        }
         const payload: unknown = action !== "delete" && round.adapter.pushPayload ? round.adapter.pushPayload(item) : item;
-        this.notificationUtils.sendMessage(folderUid, round.modelName, action, payload);
+        new EasLiveUpdates(this.notificationUtils).publish(folderUid, round.modelName, action, payload);
     }
 
     /** Recomputes, stores and publishes the counts of the folders this round's `Email` writes touched (restapi's

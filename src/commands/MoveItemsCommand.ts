@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
-import { ACLAction, ACLUtils, ApiErrors, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
-import { asEntity, hasMailAccess, type Folder, type Message } from "@rapidmx/restapi";
+import { ACLAction, ACLUtils, ApiErrors, NotificationUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
+import { asEntity, hasMailAccess, refreshFolderCounts, type Folder, type Message } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
+import { EasLiveUpdates } from "../EasLiveUpdates.js";
 import { type MessageMovePlan, planMessageMove } from "../MessageMoveRules.js";
-const { Config, Init, Inject } = ObjectDecorators;
+const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** [MS-ASCMD] `MoveItems` `Status` codes (section 2.2.3.177.10): `3` is success - not `1`, which means an invalid
  * source. */
@@ -40,6 +41,9 @@ export const MAX_MOVES_PER_REQUEST = 500;
  * `SrcMsgId` isn't a message) rather than being silently ignored. `DstMsgId` in the response is always the same `uid` as `SrcMsgId` - this
  * library never mints a new identifier on move, unlike a real Exchange server, which sometimes does.
  *
+ * Each move is published to an open web client (`EasLiveUpdates`: an update on the destination folder, a delete on the
+ * source), and both folders' counts are refreshed once the request's moves are done, as restapi's own moves do.
+ *
  * `messageClass`/`folderClass` are supplied by the Mongo/SQL concrete subclasses.
  *
  * @author Jean-Philippe Steinmetz
@@ -58,6 +62,12 @@ export abstract class MoveItemsCommand implements EasCommandHandler {
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
+
+    @Inject(NotificationUtils)
+    private notificationUtils?: NotificationUtils;
+
+    @Logger
+    private logger: any;
 
     /** Roles `ACLUtils.hasPermission()` treats as always-permitted, which must never apply to another user's
      * mail - see `SyncCommand`'s identical field for the full rationale (restapi's own `MailAccessUtils.ts`). */
@@ -83,13 +93,27 @@ export abstract class MoveItemsCommand implements EasCommandHandler {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `MoveItems supports at most ${MAX_MOVES_PER_REQUEST} Move elements per request.`);
         }
         const responses: WbxmlElement[] = [];
+        const touched = new Set<string>();
         for (const moveEl of moveEls) {
-            responses.push(await this.moveOne(ctx, moveEl));
+            responses.push(await this.moveOne(ctx, moveEl, touched));
+        }
+        if (touched.size > 0) {
+            await refreshFolderCounts(
+                {
+                    messageRepo: this.messageRepo!,
+                    folderRepo: this.folderRepo!,
+                    folderClass: this.folderClass,
+                    notificationUtils: this.notificationUtils,
+                    logger: this.logger,
+                },
+                touched,
+            );
         }
         return element(WbxmlCodePage.Move, "MoveItems", responses);
     }
 
-    private async moveOne(ctx: EasCommandContext, moveEl: WbxmlElement): Promise<WbxmlElement> {
+    /** Moves one message, adding the folders it left and entered to `touched`. */
+    private async moveOne(ctx: EasCommandContext, moveEl: WbxmlElement, touched: Set<string>): Promise<WbxmlElement> {
         const srcMsgId = childText(moveEl, "SrcMsgId");
         const srcFldId = childText(moveEl, "SrcFldId");
         const dstFldId = childText(moveEl, "DstFldId");
@@ -127,11 +151,13 @@ export abstract class MoveItemsCommand implements EasCommandHandler {
         }
 
         try {
-            await this.messageRepo!.update(
+            const moved = await this.messageRepo!.update(
                 { uid: message.uid, version: (message as any).version, folderUid: dstFldId, ...plan.patch } as any,
                 asEntity(this.messageRepo!, message),
                 { ignoreACL: true, user: ctx.user },
             );
+            new EasLiveUpdates(this.notificationUtils).moved(srcFldId, this.messageClass.name, moved);
+            touched.add(srcFldId).add(dstFldId);
         } catch {
             return this.responseElement(srcMsgId, STATUS_LOCKED, undefined);
         }
