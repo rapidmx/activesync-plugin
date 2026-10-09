@@ -8,6 +8,7 @@ import {
     ACLUtils,
     ApiErrorMessages,
     ApiErrors,
+    NotificationUtils,
     ObjectFactory,
     RepoUtils,
     type RecoverableBaseEntity,
@@ -21,6 +22,7 @@ import {
     type Folder,
     FolderType,
     RecoverableRepoUtils,
+    refreshFolderCounts,
     type Mailbox,
 } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
@@ -110,6 +112,10 @@ interface CollectionRound {
     /** The mailbox that owns the synced folder (the caller's own, unless the folder is shared). */
     getFolderMailbox: () => Promise<Mailbox>;
     audit: EasAuditLog;
+    /** The model name a write's live-update notification is published under (the concrete entity class's name). */
+    modelName: string;
+    /** Folders an `Email` write changed the contents or read state of - their counts are refreshed after the commands. */
+    countedFolders: Set<string>;
 }
 
 /**
@@ -212,6 +218,9 @@ export abstract class SyncCommand implements EasCommandHandler {
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
+
+    @Inject(NotificationUtils)
+    private notificationUtils?: NotificationUtils;
 
     @Logger
     private logger: any;
@@ -447,6 +456,8 @@ export abstract class SyncCommand implements EasCommandHandler {
             getMailbox,
             getFolderMailbox: folder.mailboxUid === ctx.mailboxUid ? getMailbox : this.mailboxLoader(folder.mailboxUid),
             audit,
+            modelName: this.collectionBindings[collectionClass]?.entityClass?.name ?? collectionClass,
+            countedFolders: new Set(),
         };
 
         const responseEntries: WbxmlElement[] = [];
@@ -474,6 +485,9 @@ export abstract class SyncCommand implements EasCommandHandler {
                 if (response) {
                     responseEntries.push(response);
                 }
+            }
+            if (round.countedFolders.size > 0) {
+                await this.refreshCounts(round);
             }
         }
 
@@ -669,6 +683,35 @@ export abstract class SyncCommand implements EasCommandHandler {
         );
     }
 
+    /**
+     * Publishes a device's write on the channel of the folder holding the item, exactly as restapi's own REST routes
+     * (`BaseScopedChildRoute.notify()`) do - the channel a web client viewing that folder is subscribed to. Without
+     * this, `RepoUtils` publishes only on the item's own uid, which nothing subscribes to, so an event created on a
+     * phone never appeared in an open web client until it reloaded. The payload is `adapter.pushPayload()`'s (a
+     * private event's busy block), or a deleted item's `{ uid }`. An `Email` write also marks its folder's counts for
+     * `refreshCounts()`. Fire-and-forget, like restapi's: never fails the command.
+     */
+    private publishWrite(round: CollectionRound, action: "create" | "update" | "delete", item: { uid: string }, folderUid: string = round.folder.uid): void {
+        if (round.collectionClass === "Email") {
+            round.countedFolders.add(folderUid);
+        }
+        if (!this.notificationUtils) {
+            return;
+        }
+        const payload: unknown = action !== "delete" && round.adapter.pushPayload ? round.adapter.pushPayload(item) : item;
+        this.notificationUtils.sendMessage(folderUid, round.modelName, action, payload);
+    }
+
+    /** Recomputes, stores and publishes the counts of the folders this round's `Email` writes touched (restapi's
+     * `refreshFolderCounts()`, as its message routes do after every write) - so a message read, moved or deleted on a
+     * device updates the folder's unread badge everywhere. Never throws. */
+    private async refreshCounts(round: CollectionRound): Promise<void> {
+        await refreshFolderCounts(
+            { messageRepo: round.repo, folderRepo: this.folderRepo!, folderClass: this.folderClass, notificationUtils: this.notificationUtils, logger: this.logger },
+            round.countedFolders,
+        );
+    }
+
     private addResponseElement(clientId: string | undefined, serverId: string | undefined, status: string): WbxmlElement {
         return element(WbxmlCodePage.AirSync, "Add", [
             ...(clientId ? [textElement(WbxmlCodePage.AirSync, "ClientId", clientId)] : []),
@@ -768,6 +811,7 @@ export abstract class SyncCommand implements EasCommandHandler {
                 { ignoreACL: true },
             );
             this.noteWrite(round, created);
+            this.publishWrite(round, "create", created);
             if (clientId) {
                 round.clientIds.set(clientId, created.uid);
             }
@@ -812,7 +856,8 @@ export abstract class SyncCommand implements EasCommandHandler {
                 return this.statusResponseElement("Change", serverId, "6");
             }
             try {
-                await adapter.changeInstance(existing, instanceId, appData, repo, await round.getFolderMailbox());
+                const occurrence = await adapter.changeInstance(existing, instanceId, appData, repo, await round.getFolderMailbox());
+                this.publishWrite(round, "update", occurrence);
                 return undefined;
             } catch (err: any) {
                 if (err instanceof ApiError && err.code === ApiErrors.INVALID_OBJECT_VERSION) {
@@ -825,6 +870,7 @@ export abstract class SyncCommand implements EasCommandHandler {
             const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox());
             const updated = await repo.update({ uid: existing.uid, version: existing.version, ...partial }, asEntity(repo, existing), { ignoreACL: true });
             this.noteWrite(round, updated);
+            this.publishWrite(round, "update", updated);
             return undefined;
         } catch (err: any) {
             if (err instanceof ApiError && err.code === ApiErrors.INVALID_OBJECT_VERSION) {
@@ -861,7 +907,13 @@ export abstract class SyncCommand implements EasCommandHandler {
                 return this.statusResponseElement("Delete", serverId, "6");
             }
             try {
-                await adapter.deleteInstance(existing, instanceId, repo);
+                const written = await adapter.deleteInstance(existing, instanceId, repo);
+                if (written.deleted) {
+                    this.publishWrite(round, "delete", { uid: written.deleted });
+                }
+                if (written.updated) {
+                    this.publishWrite(round, "update", written.updated);
+                }
                 return undefined;
             } catch {
                 return this.statusResponseElement("Delete", serverId, "6");
@@ -886,16 +938,23 @@ export abstract class SyncCommand implements EasCommandHandler {
                 if (!plan.allowed) {
                     return this.statusResponseElement("Delete", serverId, "6");
                 }
-                await repo.update({ uid: existing.uid, version: existing.version, folderUid: deletedItems.uid, ...plan.patch }, asEntity(repo, existing), {
-                    ignoreACL: true,
-                    user: ctx.user,
-                });
+                const moved = await repo.update(
+                    { uid: existing.uid, version: existing.version, folderUid: deletedItems.uid, ...plan.patch },
+                    asEntity(repo, existing),
+                    { ignoreACL: true, user: ctx.user },
+                );
+                // As restapi's update does for a record leaving its folder: an update on the folder it is in now, a
+                // delete on the one it left.
+                this.publishWrite(round, "update", moved, deletedItems.uid);
+                this.publishWrite(round, "delete", { uid: existing.uid });
+                round.countedFolders.add(deletedItems.uid);
             } else {
                 const stamp = adapter.beforeDelete ? adapter.beforeDelete(existing, await round.getFolderMailbox()) : undefined;
                 if (stamp) {
                     await repo.update({ uid: existing.uid, version: existing.version, ...stamp }, asEntity(repo, existing), { ignoreACL: true });
                 }
                 await repo.delete(existing.uid, { ignoreACL: true });
+                this.publishWrite(round, "delete", { uid: existing.uid });
             }
             if (round.collectionClass === "Email") {
                 await round.audit.record({

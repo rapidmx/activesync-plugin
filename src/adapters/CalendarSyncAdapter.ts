@@ -21,6 +21,7 @@ import {
     type RecurrenceRule,
     RecurrenceFrequency,
     RecipientType,
+    redactEventForReader,
     resolveTimeZone,
     type Attendee,
     type Mailbox,
@@ -406,10 +407,16 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
      * the occurrence's own row either way, so `fromApplicationData`'s ghosting ("unset means unchanged") already
      * does the right thing with no special-casing here.
      */
-    public async changeInstance(master: CalendarEvent, instanceId: string, appData: WbxmlElement, repo: RepoUtils<CalendarEvent>, mailbox: Mailbox): Promise<void> {
+    public async changeInstance(
+        master: CalendarEvent,
+        instanceId: string,
+        appData: WbxmlElement,
+        repo: RepoUtils<CalendarEvent>,
+        mailbox: Mailbox,
+    ): Promise<CalendarEvent> {
         const occurrence = await ensureCalendarOccurrence(repo, master, fromCompactDateTime(instanceId));
         const partial = this.fromApplicationData(appData, occurrence, mailbox);
-        await repo.update({ uid: occurrence.uid, version: occurrence.version, ...partial }, asEntity(repo, occurrence), { ignoreACL: true });
+        return await repo.update({ uid: occurrence.uid, version: occurrence.version, ...partial }, asEntity(repo, occurrence), { ignoreACL: true });
     }
 
     /**
@@ -422,19 +429,27 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
      * Exchange server uses). Uses `findCalendarOccurrence()` directly, not `ensureCalendarOccurrence()` - a
      * never-touched occurrence being deleted has no reason to first create a row just to delete it again.
      */
-    public async deleteInstance(master: CalendarEvent, instanceId: string, repo: RepoUtils<CalendarEvent>): Promise<void> {
+    public async deleteInstance(master: CalendarEvent, instanceId: string, repo: RepoUtils<CalendarEvent>): Promise<{ deleted?: string; updated?: CalendarEvent }> {
         const recurrenceId = fromCompactDateTime(instanceId);
         const override = await findCalendarOccurrence(repo, master, recurrenceId);
         if (override) {
             await repo.delete(override.uid, { ignoreACL: true });
-            return;
+            return { deleted: override.uid };
         }
         const exceptions = [...(master.recurrenceRule?.exceptions ?? []), recurrenceId];
-        await repo.update(
+        const updated = await repo.update(
             { uid: master.uid, version: master.version, recurrenceRule: { ...master.recurrenceRule!, exceptions } },
             asEntity(repo, master),
             { ignoreACL: true },
         );
+        return { updated };
+    }
+
+    /** A private or confidential event's busy block (restapi's `redactEventForReader()`, `redacted: true`), as
+     * `BaseCalendarEventRoute.pushPayload()` publishes it: a read-only shared-calendar grantee subscribes to the same
+     * channel, and the owner's client refetches an event whose notification says `redacted`. */
+    public pushPayload(event: CalendarEvent): CalendarEvent {
+        return redactEventForReader(event);
     }
 
     private attendeeFromElement(el: WbxmlElement, existingAttendees: Attendee[] = []): Attendee {

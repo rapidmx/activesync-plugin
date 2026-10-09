@@ -93,6 +93,7 @@ interface Harness {
     folderRepo: any;
     chunkRepo: any;
     logger: any;
+    notificationUtils: { sendMessage: ReturnType<typeof vi.fn> };
 }
 
 /** Builds a command with its repos/adapters poked directly, bypassing @Init/DI - the same isolation pattern
@@ -122,6 +123,8 @@ async function buildCommand(
         truncate: vi.fn().mockResolvedValue(undefined),
     };
     const logger = { warn: vi.fn(), error: vi.fn() };
+    const notificationUtils = { sendMessage: vi.fn() };
+    (command as any).notificationUtils = notificationUtils;
     (command as any).repos = new Map([[collectionClass, repo]]);
     (command as any).adapters = new Map([[collectionClass, adapter]]);
     (command as any).mailboxRepo = { findOne: vi.fn().mockResolvedValue({ uid: "mbx-1", primarySmtpAddress: "owner@example.com", displayName: "Owner" }) };
@@ -135,7 +138,7 @@ async function buildCommand(
     (command as any).logger = logger;
     // Every permission granted by default.
     (command as any).aclUtils = options.aclUtils ?? { hasPermission: vi.fn().mockResolvedValue(true) };
-    return { command, stateRepo, folderRepo, chunkRepo, logger };
+    return { command, stateRepo, folderRepo, chunkRepo, logger, notificationUtils };
 }
 
 function buildContext(request: WbxmlElement): { ctx: EasCommandContext; deviceSyncStateUpdate: ReturnType<typeof vi.fn> } {
@@ -1056,14 +1059,17 @@ describe("SyncCommand Tests (isolated)", () => {
         it("Change: delegates to the adapter's changeInstance() instead of the whole-item update, when InstanceId is present.", async () => {
             const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
             const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) });
-            const changeInstance = vi.fn().mockResolvedValue(undefined);
-            const { command } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({}), changeInstance }), repo);
+            const occurrence = { uid: "occurrence-1", folderUid: FOLDER_UID };
+            const changeInstance = vi.fn().mockResolvedValue(occurrence);
+            const { command, notificationUtils } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({}), changeInstance }), repo);
 
             const response = await command.handle(buildContext(withInstanceId("Change")).ctx);
 
             expect(findChild(collection(response!), "Responses")).toBeUndefined();
             expect(changeInstance).toHaveBeenCalledWith(existing, "20260101T120000Z", expect.objectContaining({ tag: "ApplicationData" }), repo, expect.anything());
             expect(repo.update).not.toHaveBeenCalled();
+            // The occurrence's own row is what changed.
+            expect(notificationUtils.sendMessage).toHaveBeenCalledWith(FOLDER_UID, expect.any(String), "update", occurrence);
         });
 
         it("Change: reports Status 6 when the adapter has no changeInstance(), Status 7 on a version conflict, and Status 6 on any other changeInstance() failure.", async () => {
@@ -1097,14 +1103,20 @@ describe("SyncCommand Tests (isolated)", () => {
         it("Delete: delegates to the adapter's deleteInstance() instead of the whole-item delete, when InstanceId is present.", async () => {
             const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
             const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) });
-            const deleteInstance = vi.fn().mockResolvedValue(undefined);
-            const { command } = await buildCommand("Fake", fakeAdapter({ deleteInstance }), repo);
+            const updated = { ...existing, version: 2 };
+            const deleteInstance = vi.fn().mockResolvedValueOnce({ updated }).mockResolvedValueOnce({ deleted: "occurrence-1" });
+            const { command, notificationUtils } = await buildCommand("Fake", fakeAdapter({ deleteInstance }), repo);
 
             const response = await command.handle(buildContext(withInstanceId("Delete")).ctx);
 
             expect(findChild(collection(response!), "Responses")).toBeUndefined();
             expect(deleteInstance).toHaveBeenCalledWith(existing, "20260101T120000Z", repo);
             expect(repo.delete).not.toHaveBeenCalled();
+            // The series gained an exception...
+            expect(notificationUtils.sendMessage).toHaveBeenLastCalledWith(FOLDER_UID, expect.any(String), "update", updated);
+            // ...or an individually edited occurrence's own row went away.
+            await command.handle(buildContext(withInstanceId("Delete")).ctx);
+            expect(notificationUtils.sendMessage).toHaveBeenLastCalledWith(FOLDER_UID, expect.any(String), "delete", { uid: "occurrence-1" });
         });
 
         it("Delete: reports Status 6 when the adapter has no deleteInstance(), and Status 6 on any deleteInstance() failure.", async () => {
@@ -1119,6 +1131,62 @@ describe("SyncCommand Tests (isolated)", () => {
                 fakeRepo({ findOne: vi.fn().mockResolvedValue(existing) }),
             );
             expect(responseStatus(await broken.handle(buildContext(withInstanceId("Delete")).ctx), "Delete")).toBe("6");
+        });
+    });
+
+    describe("Live updates", () => {
+        const command = (kind: "Add" | "Change" | "Delete", serverId = "item-1") =>
+            element(WbxmlCodePage.AirSync, kind, [
+                ...(kind === "Add" ? [textElement(WbxmlCodePage.AirSync, "ClientId", "c1")] : [textElement(WbxmlCodePage.AirSync, "ServerId", serverId)]),
+                ...(kind === "Delete" ? [] : [element(WbxmlCodePage.AirSync, "ApplicationData", [])]),
+            ]);
+
+        it("Publishes each device write on its folder's channel under the entity's model name, carrying the adapter's pushPayload().", async () => {
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
+            const repo = fakeRepo({
+                findOne: vi.fn().mockResolvedValue(existing),
+                create: vi.fn().mockResolvedValue({ uid: "new-1", folderUid: FOLDER_UID, dateModified: new Date() }),
+                update: vi.fn().mockResolvedValue({ ...existing, version: 2, dateModified: new Date() }),
+                delete: vi.fn().mockResolvedValue(undefined),
+            });
+            const adapter = fakeAdapter({ fromApplicationData: () => ({}), pushPayload: (item: any) => ({ uid: item.uid, redacted: true }) });
+            const { command: sync, notificationUtils } = await buildCommand("Calendar", adapter, repo, { state: storedState({ collectionClass: "Calendar" }) });
+
+            await sync.handle(buildContext(syncRequest("Calendar", [command("Add"), command("Change"), command("Delete")])).ctx);
+
+            expect(notificationUtils.sendMessage.mock.calls).toEqual([
+                [FOLDER_UID, "CalendarEventMongo", "create", { uid: "new-1", redacted: true }],
+                [FOLDER_UID, "CalendarEventMongo", "update", { uid: "item-1", redacted: true }],
+                // A deleted item's notification only names it.
+                [FOLDER_UID, "CalendarEventMongo", "delete", { uid: "item-1" }],
+            ]);
+        });
+
+        it("Publishes the item itself without a pushPayload(), nothing for a refused write, and nothing at all without NotificationUtils.", async () => {
+            const repo = fakeRepo({ create: vi.fn().mockResolvedValue({ uid: "new-1", folderUid: FOLDER_UID }) });
+            const { command: sync, notificationUtils } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({}) }), repo);
+            await sync.handle(buildContext(syncRequest("Fake", [command("Add"), command("Change", "missing")])).ctx);
+            expect(notificationUtils.sendMessage.mock.calls).toEqual([[FOLDER_UID, "Fake", "create", { uid: "new-1", folderUid: FOLDER_UID }]]);
+
+            const { command: silent } = await buildCommand("Fake", fakeAdapter({ fromApplicationData: () => ({}) }), repo);
+            (silent as any).notificationUtils = undefined;
+            const response = await silent.handle(buildContext(syncRequest("Fake", [command("Add")])).ctx);
+            expect(responseStatus(response, "Add")).toBe("1");
+        });
+
+        it("Publishes an Email delete-as-move as an update on Deleted Items and a delete on the folder it left.", async () => {
+            const message = { uid: "msg-1", version: 3, folderUid: FOLDER_UID };
+            const moved = { ...message, version: 4, folderUid: "deleted-items" };
+            const repo = fakeRepo({ findOne: vi.fn().mockResolvedValue(message), update: vi.fn().mockResolvedValue(moved) });
+            const { command: sync, notificationUtils } = await buildCommand("Email", fakeAdapter(), repo, {
+                state: storedState({ collectionClass: "Email" }),
+                folder: { uid: FOLDER_UID, mailboxUid: "mbx-1", type: FolderType.INBOX },
+            });
+
+            await sync.handle(buildContext(syncRequest("Email", [command("Delete", "msg-1")])).ctx);
+
+            expect(notificationUtils.sendMessage).toHaveBeenCalledWith("deleted-items", "MessageMongo", "update", moved);
+            expect(notificationUtils.sendMessage).toHaveBeenCalledWith(FOLDER_UID, "MessageMongo", "delete", { uid: "msg-1" });
         });
     });
 

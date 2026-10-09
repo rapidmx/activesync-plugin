@@ -2110,6 +2110,9 @@ describe("Route:EasRouteSQL Tests", () => {
                 const deleted = await messageRepo.findOne({ where: { uid: message.uid } });
                 expect(deleted?.deleted).toBe(false);
                 expect(deleted?.folderUid).not.toBe(folder.uid);
+                // The folder it landed in has its counts refreshed, as restapi's own message writes do.
+                const deletedItems = await folderRepo.findOne({ where: { uid: deleted!.folderUid } });
+                expect(deletedItems).toMatchObject({ unreadCount: 1, totalCount: 1 });
             });
         });
     });

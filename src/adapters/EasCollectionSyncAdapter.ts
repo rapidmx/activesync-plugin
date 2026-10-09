@@ -117,8 +117,9 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
      * @param appData The command's `<ApplicationData>` element - the occurrence's own new field values.
      * @param repo The collection's own repo, for the create-or-update this performs directly.
      * @param mailbox The mailbox that owns `master`.
+     * @returns The occurrence's own row as saved.
      */
-    changeInstance?(master: T, instanceId: string, appData: WbxmlElement, repo: RepoUtils<T>, mailbox: Mailbox): Promise<void>;
+    changeInstance?(master: T, instanceId: string, appData: WbxmlElement, repo: RepoUtils<T>, mailbox: Mailbox): Promise<T>;
 
     /**
      * Applies a client-originated `Delete` targeting one *occurrence* of a recurring series (MS-ASAIRSYNCBASE
@@ -126,6 +127,17 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
      * already created one, or else recording it in the series' own exception list) rather than `SyncCommand`'s
      * own generic whole-row delete, which would destroy the entire series. See `changeInstance`'s own doc
      * comment for `master`/`instanceId`; optional the same way, same fallback (Status 6) when absent.
+     *
+     * @returns What was written: the occurrence's own row deleted (`deleted`, its uid), or the series updated with
+     * the occurrence as an exception (`updated`).
      */
-    deleteInstance?(master: T, instanceId: string, repo: RepoUtils<T>): Promise<void>;
+    deleteInstance?(master: T, instanceId: string, repo: RepoUtils<T>): Promise<{ deleted?: string; updated?: T }>;
+
+    /**
+     * What a live-update notification of a device's write carries of `item` (see `SyncCommand.publishWrite()`), when
+     * not the item itself. Every subscriber of the folder's channel receives the same payload, so an adapter whose items
+     * aren't fully readable by every subscriber returns what they all may see - restapi's own routes' `pushPayload()`.
+     * `CalendarSyncAdapter` returns a private event's busy block.
+     */
+    pushPayload?(item: T): unknown;
 }
