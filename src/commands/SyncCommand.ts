@@ -772,8 +772,10 @@ export abstract class SyncCommand implements EasCommandHandler {
                 round.clientIds.set(clientId, created.uid);
             }
             return this.addResponseElement(clientId, created.uid, "1");
-        } catch {
-            // Status 6: "the client has sent a malformed or invalid item".
+        } catch (err: any) {
+            // Status 6: "the client has sent a malformed or invalid item". Logged, since the device only keeps the
+            // item to itself and the server would otherwise have no trace of why it never arrived.
+            this.logger?.warn(`SyncCommand: refused a ${round.collectionClass} Add for folder ${folder.uid} (Status 6): ${err?.message ?? err}`);
             return this.addResponseElement(clientId, undefined, "6");
         }
     }
