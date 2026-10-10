@@ -132,7 +132,9 @@ describe("TimeZoneInfo", () => {
 
         it("Prefers the caller's zones when they have the same rules, skipping unresolvable ones.", () => {
             const pacific = encodeTimeZone("America/Los_Angeles", REFERENCE);
-            expect(decodeTimeZone(pacific, REFERENCE, [undefined, "Not/AZone", "America/Vancouver"])).toBe("America/Vancouver");
+            // `US/Pacific` is a tz database link to `America/Los_Angeles`: a different name whose rules can never diverge from it, unlike a
+            // real neighbour's (British Columbia's 2026 move to permanent daylight time split `America/Vancouver` from it in newer tzdata).
+            expect(decodeTimeZone(pacific, REFERENCE, [undefined, "Not/AZone", "US/Pacific"])).toBe("US/Pacific");
             // A preferred zone with different rules doesn't win.
             expect(decodeTimeZone(pacific, REFERENCE, ["Europe/Berlin"])).toBe("America/Los_Angeles");
         });

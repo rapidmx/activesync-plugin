@@ -480,7 +480,8 @@ describe("CalendarSyncAdapter Tests", () => {
             const pacific = encodeTimeZone("America/Los_Angeles", new Date("2026-07-01T16:00:00.000Z"));
             const el = (tz: string) => appData([cal("Timezone", tz), cal("StartTime", "20260701T160000Z")]);
             expect(adapter.fromApplicationData(el(pacific)).timezone).toBe("America/Los_Angeles");
-            expect(adapter.fromApplicationData(el(pacific), timed({ timezone: "America/Vancouver" })).timezone).toBe("America/Vancouver");
+            // A link to `America/Los_Angeles`, so its rules always match (see TimeZoneInfo.test.ts).
+            expect(adapter.fromApplicationData(el(pacific), timed({ timezone: "US/Pacific" })).timezone).toBe("US/Pacific");
             const mailbox: any = { primarySmtpAddress: "me@example.com", aliasAddresses: [], timezone: "America/Tijuana" };
             expect(adapter.fromApplicationData(el(pacific), undefined, mailbox).timezone).toBe("America/Tijuana");
         });

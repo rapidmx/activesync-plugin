@@ -332,7 +332,7 @@ function knownZones(): string[] {
 /**
  * The IANA zone a device's base64 MS-ASDTYPE `TimeZone` value describes, as of `reference` - see this module's doc
  * comment for the search order. `preferred` zones (unresolvable or empty entries are skipped) win any tie, so an
- * event already filed in `America/Vancouver` stays there rather than becoming `America/Los_Angeles`.
+ * event already filed in `US/Pacific` stays there rather than becoming `America/Los_Angeles`.
  */
 export function decodeTimeZone(value: string, reference: Date, preferred: (string | undefined)[] = []): string | undefined {
     const info = decodeTimeZoneInformation(value);
