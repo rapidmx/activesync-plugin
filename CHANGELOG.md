@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-10
+
+### Added
+- Added CalendarSyncAdapter.changeInstance()/deleteInstance(), resolving or creating the occurrence's own override row via the shared findCalendarOccurrence()/ensureCalendarOccurrence() helpers, which MeetingResponseCommand also now uses for its own identical InstanceId handling
+- Added EasLiveUpdates to publish device writes on their folder's push channel the way restapi's routes do, and use it in SyncCommand
+
+### Changed
+- Honor every BodyPreference a device sends in Sync and ItemOperations Fetch, not just the first one, since a real device (Apple Mail) sends one per Type and a response matching neither caused it to show every message as undownloadable
+- Handle Sync's own Commands/Fetch, a separate mechanism from ItemOperations that a real device (Apple Mail) uses exclusively to fetch a message body, which this library silently dropped with no response at all
+- Honor BodyPreference Type 4 (raw MIME) when resolving a Sync body, matching what ItemOperationsCommand.fetchMessage() already does for an explicit MIME request
+- Honor airsyncbase:InstanceId (protocol 16.0+) on a Sync Change/Delete and a MeetingResponse, so editing, deleting, or responding to one occurrence of a recurring series no longer silently acts on the entire series
+- Log any unrecognized Sync Commands child instead of silently dropping it with no trace at all - the exact gap that hid the embedded Fetch element for a long time, with no error and nothing to chase
+- Response behavior is unchanged (still no error Status), since a client-tolerated quirk this library hasn't catalogued could regress - this only makes the next such gap visible in logs instead of invisible
+- Preserve an existing contact phone of a kind EAS has no tag for (OTHER) across a Home/Business phone edit, instead of silently deleting it
+- fromApplicationData() never received the existing Contact at all, so every phone rebuild started from nothing but the wire's Home/Business tags - fixed by accepting existing (already passed by SyncCommand.applyChange, just never used here) and carrying its untagged-kind phones forward
+- Send MS-ASPROV's AccountOnlyRemoteWipe wire directive (protocol 16.0+) instead of the full-device RemoteWipe when an admin requested an account-only wipe
+- remoteWipeAccountOnly was already recorded on DeviceSyncState but never actually changed what reached the device - every wipe looked identical to the device regardless of the admin's choice. Fixes the end-to-end RemoteWipe route test, which asserted that bug as correct.
+- Map MS-ASCONTACTS' MobilePhoneNumber to a new ContactAddressKind.MOBILE phone, and emit MS-ASEMAIL's ReplyTo and MS-ASEMAIL2's LastVerbExecuted/LastVerbExecutionTime, none of which this library ever had a way to represent
+- Requires restapi's new ContactAddressKind.MOBILE, Message.replyTo and MessageFlags.lastVerbExecutedAt fields (not yet released) - SmartForwardCommand/SmartReplyCommand now stamp lastVerbExecutedAt alongside the forwarded/answered flag they already set, since restapi itself never writes those flags
+- Encode and decode the MS-ASDTYPE TimeZone structure from IANA zones, deriving each zone's Windows transition rules at runtime
+- Emit each calendar event's Timezone and decode a device's Timezone into the event's IANA zone, falling back to the mailbox's zone
+- Send all-day events as date-only values to 16.x clients and as local midnights with a Timezone to older clients
+- Emit TimeZone on a meeting request and render all-day invite times per protocol version
+- Read the MS-ASProtocolVersion header into the command context
+- Map the SUGGESTED_CONTACTS folder type to FolderSync type 14 and the Contacts class
+- Log why a client-originated Sync Add was refused with Status 6 instead of failing silently
+- Accept a calendar Add or Change whose Recurrence has no Type as a non-repeating event, which iOS sends for every event that doesn't repeat, instead of refusing it with Status 6
+- Publish each device Sync write on its folder's push channel as restapi's routes do, so an open web client shows items created, changed or deleted on a device without a reload
+- Publish a private calendar event's busy block rather than its details through a new pushPayload adapter hook
+- Return the written rows from changeInstance and deleteInstance so occurrence edits are published too
+- Refresh and publish the counts of the folders a device's Email writes touched
+- Publish MoveItems moves and refresh the source and destination folder counts
+- Publish ItemOperations EmptyFolderContents deletions and conversation moves and refresh the affected folder counts
+- Publish MeetingResponse event updates and deletions, sending a private event's busy block
+- Publish the SendMail/SmartReply/SmartForward Sent Items copy and the replied/forwarded flag change, and refresh Sent Items counts
+- Let a provisioned device's Ping through without its policy key, as grommunio-sync does, so Android's Gmail client stops looping through Provision and holds a push connection for Calendar and Contacts
+- Updated restapi dep
+- Updated plugin description
+
+### Removed
+- Removed the temporary ItemOperations Fetch and Ping diagnostic logging now that both device investigations are resolved
+
+
 ## [1.0.0-beta.18] - 2026-10-07
 
 ### Added
@@ -371,7 +414,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.18...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.18...v1.0.0
 [1.0.0-beta.18]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.17...v1.0.0-beta.18
 [1.0.0-beta.17]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.16...v1.0.0-beta.17
 [1.0.0-beta.16]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.15...v1.0.0-beta.16

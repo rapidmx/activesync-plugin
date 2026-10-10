@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.0.0
+
 Phones and mail apps that speak Exchange ActiveSync (EAS) can now sync a RapidMX mailbox's mail, contacts, calendars and tasks, send mail, and get
 changes pushed to them as they happen. It has been tested end to end on iOS (Apple Mail, Contacts and Calendar), and on Android (native Gmail
 app), with every item type syncing both ways and pushed in real time.
