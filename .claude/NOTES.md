@@ -1390,3 +1390,12 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
 - **Meeting requests** (`EmailSyncAdapter`) now always carry `TimeZone` (invite's zone, else mailbox's, else UTC).
 - Also: restapi HEAD's new `FolderType.SUGGESTED_CONTACTS` -> FolderSync type 14 / Contacts class (needed to compile against restapi HEAD).
 - **Release dependency**: activesync now needs restapi's unreleased `WindowsZones` exports + `SUGGESTED_CONTACTS`. Locally tested by copying restapi's full `dist` into `node_modules/@rapidmx/restapi/dist`; CI will fail until restapi is released and the dep bumped.
+
+### 2026-10-10 - Android (Gmail app) Calendar/Contacts never auto-synced: root-caused to the Ping provisioning gate (`50c7666`)
+
+- Gateway logs over 6h: device `androidc71451855` (`Android-Mail/2026.09.21...`) sent zero `Ping`, only `FolderSync` + 3 `Sync`s every ~15-20 min - its account sync frequency was a fixed interval, and Gmail's Exchange client only refreshes Calendar/Contacts in the background via `Ping`.
+- With "Automatic (Push)" turned on it went straight back into the 2026-09-27 loop: `Ping` -> 449 -> two-step `Provision` (both 200) -> `Ping` -> 449, several times a second. The 2026-09-28 "client-side" conclusion was wrong about the remedy: the handshake is fine, but the client's `Ping` doesn't present the key it acknowledged (none, or a stale one) while its `Sync`s do.
+- grommunio-sync marks `Ping` `UNPROVISIONED` (`lib/core/gsync.php`): never gated. Fix: `BaseEasRoute`'s gate now only requires `provisioned` (and a stored key) for `Ping`, not a matching presented key - a never-provisioned device and one with a remote wipe pending (`remoteWipe` clears `provisioned`) still get 449. Every other command unchanged. Tests in both `EasRoute` suites.
+- Also noted from grommunio (not done): for protocol >= 14.0 it answers an unprovisioned non-Ping command with HTTP 200 + command Status 142 instead of HTTP 449.
+- activesync's `node_modules/@rapidmx/restapi` had been reinstalled at 0.32.0 (package.json still `^0.32.0`); restapi 0.33.0 (with the zone/MOBILE/replyTo fields) is published - bump the dep on the next release.
+- **Confirmed fixed on JP's Android phone (2026-10-10)**: real-time push for all items. The temporary `EAS_DEBUG` Ping and ItemOperations Fetch logging was removed in the following commit; no diagnostic logging remains in `src/`.
