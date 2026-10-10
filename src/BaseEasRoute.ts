@@ -216,13 +216,20 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
         // to present the policy key it acknowledged ([MS-ASPROV]: `X-MS-PolicyKey`, or the `PolicyKey` query value).
         // A missing or stale key - e.g. one from before an admin-requested remote wipe, which clears the stored key -
         // is sent back through Provision with the same 449 rather than being served.
+        //
+        // `Ping` only needs the device to be provisioned, not to present the key: it returns no data, only which
+        // folders changed, and whatever the device then fetches is gated as usual. Android's Gmail client sends its
+        // `Ping` without the key it just acknowledged (or with an older one), so a 449 there sent it back through
+        // Provision in a loop and it never held a push connection - Calendar and Contacts then never synced on their
+        // own. grommunio-sync exempts `Ping` from provisioning altogether; this keeps the part that matters: a device
+        // never provisioned, or with a remote wipe pending (which clears `provisioned`), still goes through Provision.
         if (!this.exemptFromProvisioning(cmd, request)) {
             const presentedKey: string | undefined = firstQueryValue(req.headers["x-ms-policykey"]) ?? policyKey;
+            const keyRequired: boolean = cmd !== "Ping";
             if (
                 !deviceSyncState.provisioned ||
                 !deviceSyncState.policyKey ||
-                !presentedKey ||
-                !timingSafeEqualStrings(presentedKey, deviceSyncState.policyKey)
+                (keyRequired && (!presentedKey || !timingSafeEqualStrings(presentedKey, deviceSyncState.policyKey)))
             ) {
                 res.status(HTTP_STATUS_RETRY_WITH).send();
                 return;

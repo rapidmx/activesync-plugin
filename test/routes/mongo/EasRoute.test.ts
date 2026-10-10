@@ -5022,6 +5022,33 @@ describe("Route:EasRouteMongo Tests", () => {
         };
 
         describe("provisioning", () => {
+            it("Lets a provisioned device's Ping through without its policy key (Android's Gmail client sends none), but not an unprovisioned device's, nor one with a remote wipe pending.", async () => {
+                const mailbox = await createMailbox(owner.uid);
+                const ping = (deviceId: string) =>
+                    request(server.getApplication())
+                        .post(`${baseUrl}?Cmd=Ping&DeviceId=${deviceId}`)
+                        .set("Authorization", "jwt " + ownerToken);
+
+                // Never provisioned: sent through Provision first.
+                expect((await ping("dev1")).status).toBe(449);
+
+                await provisionDevice("dev1");
+                // No key, and a stale one: answered all the same (an empty Ping is Status 3, at once).
+                expect((await ping("dev1")).status).toBe(200);
+                expect((await ping("dev1").set("X-MS-PolicyKey", "stale")).status).toBe(200);
+                // Every other command still needs the key.
+                expect((await request(server.getApplication()).post(`${baseUrl}?Cmd=FolderSync&DeviceId=dev1`).set("Authorization", "jwt " + ownerToken)).status).toBe(449);
+
+                // A remote wipe pending: back through Provision, where the wipe directive waits.
+                const state = await deviceSyncStateRepo.findOne({ mailboxUid: mailbox.uid, deviceId: "dev1" } as any);
+                const wipe = await request(server.getApplication())
+                    .post(`/mongo/device-sync-state/${state!.uid}/remote-wipe`)
+                    .set("Authorization", "jwt " + adminToken)
+                    .send({});
+                expect(wipe.status).toBe(200);
+                expect((await ping("dev1")).status).toBe(449);
+            });
+
             it("Refuses commands without the acknowledged X-MS-PolicyKey, and a remote wipe invalidates the old key at once.", async () => {
                 const mailbox = await createMailbox(owner.uid);
                 await provisionDevice("dev1");
