@@ -96,7 +96,7 @@
         "plugin": {
             "apiVersion": 1,
             "displayName": "Exchange ActiveSync",
-            "description": "Lets phones and mail apps sync mail, contacts, calendars and tasks over Exchange ActiveSync (served at /Microsoft-Server-ActiveSync).",
+            "description": "Lets devices and apps sync mail, contacts, calendars and tasks using the Exchange ActiveSync protocol.",
             "mailboxScopedData": true,
             "settings": [
                 {
