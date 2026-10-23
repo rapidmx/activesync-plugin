@@ -1399,3 +1399,13 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
 - Also noted from grommunio (not done): for protocol >= 14.0 it answers an unprovisioned non-Ping command with HTTP 200 + command Status 142 instead of HTTP 449.
 - activesync's `node_modules/@rapidmx/restapi` had been reinstalled at 0.32.0 (package.json still `^0.32.0`); restapi 0.33.0 (with the zone/MOBILE/replyTo fields) is published - bump the dep on the next release.
 - **Confirmed fixed on JP's Android phone (2026-10-10)**: real-time push for all items. The temporary `EAS_DEBUG` Ping and ItemOperations Fetch logging was removed in the following commit; no diagnostic logging remains in `src/`.
+
+## 2026-10-22 - Zero-access encryption: S/MIME passthrough
+
+- A zero-access message (`Message.zeroAccess`, restapi `specs/search.md` §3) is stored as S/MIME enveloped-data that this server cannot read. The new `src/ZeroAccess.ts` handles it:
+  - Sync and ItemOperations report it as `MessageClass` `IPM.Note.SMIME` (meeting classes still win).
+  - It is served verbatim for MIME (Type 4) requests, so a device holding the RapidMX keys exported from web-client decrypts it itself.
+  - Every other body type, and the no-BodyPreference fallback, gets `ZERO_ACCESS_PLACEHOLDER_TEXT` without touching the blob.
+- `isZeroAccessMessage()` reads `zeroAccess` structurally, because this repo builds against a published `@rapidmx/restapi` that predates the field. Simplify it once the dependency is bumped.
+- **Not done yet: the write paths.** Drafts and sent items saved over EAS (`EmailSyncAdapter` drafts, `ComposeMailCommand`) still store plaintext. They need restapi's `ZeroAccessWriter`, which is only usable after a restapi release.
+- **Known limits for a sealed original:** MeetingResponse and SmartReply/SmartForward can't read it server-side.

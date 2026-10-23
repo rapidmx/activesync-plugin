@@ -19,6 +19,7 @@ import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { createHash } from "crypto";
 import { AuditLogUtils, FolderType } from "@rapidmx/restapi";
 import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
+import { ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
 
 describe("ItemOperationsCommand Tests (guard clause only)", () => {
     it("handle() throws INTERNAL_ERROR when a required dependency is not set.", async () => {
@@ -372,5 +373,49 @@ describe("ItemOperationsCommand Tests (guard clause only)", () => {
 
             await expect(command.handle(adminCtx)).rejects.toMatchObject({ status: 403 });
         });
+    });
+});
+
+describe("ItemOperationsCommand - zero-access message", () => {
+    const SEALED = 'Subject: [...]\r\nContent-Type: application/pkcs7-mime; smime-type=enveloped-data; name="smime.p7m"\r\n\r\nMIIB';
+
+    function build() {
+        const objectFactory = new ObjectFactory(config, Logger());
+        const command = objectFactory.newInstance<ItemOperationsCommandMongo>(ItemOperationsCommandMongo, { initialize: false }) as any;
+        const get = vi.fn().mockResolvedValue(Buffer.from(SEALED));
+        Object.assign(command, {
+            messageRepo: {
+                findOne: vi.fn().mockResolvedValue({ uid: "m1", folderUid: "f1", mailboxUid: "mbx", subject: "[...]", zeroAccess: { keyFingerprint: "fp", sealedSummary: "x" } }),
+            },
+            aclUtils: { hasPermission: vi.fn().mockResolvedValue(true) },
+            blobStore: { get },
+        });
+        return { command, get };
+    }
+    const fetch = (command: any, type?: string) =>
+        command.fetchMessage(
+            { user: { uid: "u" }, mailboxUid: "mbx" },
+            { record: vi.fn() },
+            "m1",
+            type ? element(WbxmlCodePage.ItemOperations, "Options", [element(WbxmlCodePage.AirSyncBase, "BodyPreference", [textElement(WbxmlCodePage.AirSyncBase, "Type", type)])]) : undefined,
+            1_000_000,
+        );
+    const bodyOf = (result: any) => findChild(findChild(result.element, "Properties")!, "Body")!;
+
+    it("serves the sealed S/MIME source verbatim when the device asks for MIME", async () => {
+        const { command } = build();
+        const body = bodyOf(await fetch(command, "4"));
+        expect(childText(body, "Type")).toBe("4");
+        expect(childText(body, "Data")).toBe(SEALED);
+    });
+
+    it("serves the explanation instead of trying to read it as text or HTML", async () => {
+        const { command, get } = build();
+        for (const type of ["1", "2", undefined]) {
+            const body = bodyOf(await fetch(command, type));
+            expect(childText(body, "Type")).toBe("1");
+            expect(childText(body, "Data")).toBe(ZERO_ACCESS_PLACEHOLDER_TEXT);
+        }
+        expect(get).not.toHaveBeenCalled();
     });
 });

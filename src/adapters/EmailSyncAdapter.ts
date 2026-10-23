@@ -33,6 +33,7 @@ import {
     RecipientType,
     resolveTimeZone,
 } from "@rapidmx/restapi";
+import { isZeroAccessMessage, ZERO_ACCESS_MESSAGE_CLASS, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../ZeroAccess.js";
 const { Init, Inject } = ObjectDecorators;
 
 /** MS-ASEMAIL `Importance`: 0=Low, 1=Normal, 2=High. */
@@ -289,6 +290,9 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                     if (wantsMime) {
                         type = BODY_TYPE_MIME;
                         text = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
+                    } else if (isZeroAccessMessage(message)) {
+                        // Sealed: nothing here can read it - only its MIME (above) is any use to the device.
+                        text = ZERO_ACCESS_PLACEHOLDER_TEXT;
                     } else if (wantsHtml && message.sanitizedHtmlBlobKey) {
                         type = BODY_TYPE_HTML;
                         text = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
@@ -323,7 +327,12 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         const to = message.recipients.filter((r) => r.type === RecipientType.TO).map((r) => r.address);
         const cc = message.recipients.filter((r) => r.type === RecipientType.CC).map((r) => r.address);
         const bcc = message.recipients.filter((r) => r.type === RecipientType.BCC).map((r) => r.address);
-        const messageClass = message.meetingMethod ? MESSAGE_CLASS_BY_METHOD[message.meetingMethod] : undefined;
+        const messageClass = message.meetingMethod
+            ? MESSAGE_CLASS_BY_METHOD[message.meetingMethod]
+            : isZeroAccessMessage(message)
+              ? ZERO_ACCESS_MESSAGE_CLASS
+              : undefined;
+        const fallbackBody: string = isZeroAccessMessage(message) ? ZERO_ACCESS_PLACEHOLDER_TEXT : message.bodyPreview;
 
         // MS-ASEMAIL2 `LastVerbExecuted`/`LastVerbExecutionTime`: the device's "replied"/"forwarded" icon keys
         // off this, not `Read`/`Flag` - `Message.flags.answered`/`forwarded` already tracked whether, but with
@@ -360,9 +369,9 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
             ...(messageClass ? [textElement(WbxmlCodePage.Email, "MessageClass", messageClass)] : []),
             element(WbxmlCodePage.AirSyncBase, "Body", [
                 textElement(WbxmlCodePage.AirSyncBase, "Type", body?.type ?? BODY_TYPE_PLAIN_TEXT),
-                textElement(WbxmlCodePage.AirSyncBase, "EstimatedDataSize", String(body?.estimatedDataSize ?? Buffer.byteLength(message.bodyPreview, "utf8"))),
+                textElement(WbxmlCodePage.AirSyncBase, "EstimatedDataSize", String(body?.estimatedDataSize ?? Buffer.byteLength(fallbackBody, "utf8"))),
                 textElement(WbxmlCodePage.AirSyncBase, "Truncated", body ? (body.truncated ? "1" : "0") : "1"),
-                textElement(WbxmlCodePage.AirSyncBase, "Data", body?.data ?? message.bodyPreview),
+                textElement(WbxmlCodePage.AirSyncBase, "Data", body?.data ?? fallbackBody),
             ]),
             // MS-ASAIRS `NativeBodyType` - a sibling of `Body` under `ApplicationData`, spec-optional but
             // mirrors the `Type` just emitted above (the codec already had this token defined; no adapter ever

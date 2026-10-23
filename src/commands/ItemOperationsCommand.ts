@@ -27,6 +27,7 @@ import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../Mess
 import { truncateUtf8 } from "../MimeHeaderUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 import { EasLiveUpdates } from "../EasLiveUpdates.js";
+import { isZeroAccessMessage, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../ZeroAccess.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Caps how many messages `emptyFolderContents`/`moveConversation` process per backing `find()`/delete-batch
@@ -286,6 +287,9 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         if (requestedType === "4") {
             bodyType = "4";
             bodyText = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
+        } else if (isZeroAccessMessage(message)) {
+            // Sealed: only its MIME (above) is any use to the device - see `ZeroAccess.ts`.
+            bodyText = ZERO_ACCESS_PLACEHOLDER_TEXT;
         } else if (message.sanitizedHtmlBlobKey) {
             bodyType = "2";
             bodyText = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");

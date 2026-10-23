@@ -11,6 +11,7 @@ import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { element, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { EmailSyncAdapter } from "../../src/adapters/EmailSyncAdapter.js";
 import { decodeTimeZoneInformation } from "../../src/TimeZoneInfo.js";
+import { ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
 import { FolderType, MessageImportance, RecipientType, type Mailbox, type Message } from "@rapidmx/restapi";
 
 /** `EmailSyncAdapter` is abstract (it needs a backend-specific `labelClass`, supplied by
@@ -715,6 +716,36 @@ describe("EmailSyncAdapter Tests", () => {
 
             const [plain] = await adapter.toApplicationDataBatch([baseMessage]);
             expect(fieldOf(plain, "MessageClass")).toBeUndefined();
+        });
+
+        describe("zero-access message", () => {
+            const sealed = { ...baseMessage, subject: "[...]", bodyPreview: "", bodyBlobKey: "za/mbx/msg-1", zeroAccess: { keyFingerprint: "fp", sealedSummary: "x" } } as Message;
+
+            it("Is an S/MIME message (IPM.Note.SMIME) the device decrypts itself, unless it's a meeting message.", async () => {
+                const { adapter } = buildAdapter();
+                const [rendered] = await adapter.toApplicationDataBatch([sealed]);
+                expect(fieldOf(rendered, "MessageClass")).toBe("IPM.Note.SMIME");
+
+                const [meeting] = await adapter.toApplicationDataBatch([{ ...sealed, meetingMethod: "REQUEST" }]);
+                expect(fieldOf(meeting, "MessageClass")).toBe("IPM.Schedule.Meeting.Request");
+            });
+
+            it("Sends the sealed MIME for Type 4, and the explanation for any other type or none.", async () => {
+                const { adapter, get } = buildAdapter();
+                get.mockResolvedValue(Buffer.from("Subject: [...]\r\n\r\nMIIB"));
+
+                const [mime] = await adapter.toApplicationDataBatch([sealed], { type: "4" });
+                expect(fieldOf(mime.children.find((c) => c.tag === "Body")!, "Data")).toBe("Subject: [...]\r\n\r\nMIIB");
+
+                get.mockClear();
+                for (const preference of [{ type: "1" }, { type: "2" }, undefined]) {
+                    const [rendered] = await adapter.toApplicationDataBatch([sealed], preference);
+                    const body = rendered.children.find((c) => c.tag === "Body")!;
+                    expect(fieldOf(body, "Data")).toBe(ZERO_ACCESS_PLACEHOLDER_TEXT);
+                    expect(fieldOf(body, "EstimatedDataSize")).toBe(String(Buffer.byteLength(ZERO_ACCESS_PLACEHOLDER_TEXT)));
+                }
+                expect(get).not.toHaveBeenCalled();
+            });
         });
 
         describe("BodyPreference", () => {
