@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-24
+
+### Changed
+- Use US/Pacific, a tz link to America/Los_Angeles, in the preferred-zone tests instead of America/Vancouver, whose rules newer tzdata splits from Los Angeles after British Columbia's move to permanent daylight time
+- Serve a zero-access message as an S/MIME message (IPM.Note.SMIME) whose MIME a device holding the user's RapidMX keys decrypts itself
+- Send an explanation instead of an empty body when a device asks a zero-access message for text or HTML
+- Build against @rapidmx/restapi ^0.34.0
+- Describe the zero-access encryption changes in the release notes
+
 ## [1.0.0] - 2026-10-10
 
 ### Added
@@ -414,7 +423,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.18...v1.0.0
 [1.0.0-beta.18]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.17...v1.0.0-beta.18
 [1.0.0-beta.17]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.16...v1.0.0-beta.17

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.1.0
+
 ### Added
 
 - **Zero-access encrypted mail is served as S/MIME.** A message stored with zero-access encryption (`@rapidmx/restapi` 0.34) is sent to the device as an S/MIME message (`IPM.Note.SMIME`) whose MIME the device decrypts itself, once the user has installed their exported RapidMX keys (web client: Settings > Encryption > Export keys for Outlook or a phone). A device that asks for the message as text or HTML gets a short explanation instead of an empty body.
