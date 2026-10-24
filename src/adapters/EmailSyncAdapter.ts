@@ -33,7 +33,7 @@ import {
     RecipientType,
     resolveTimeZone,
 } from "@rapidmx/restapi";
-import { isZeroAccessMessage, ZERO_ACCESS_MESSAGE_CLASS, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../ZeroAccess.js";
+import { ENCRYPTED_PLACEHOLDER_TEXT, isEndToEndEncryptedMessage, isZeroAccessMessage, ZERO_ACCESS_MESSAGE_CLASS, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../ZeroAccess.js";
 const { Init, Inject } = ObjectDecorators;
 
 /** MS-ASEMAIL `Importance`: 0=Low, 1=Normal, 2=High. */
@@ -293,6 +293,9 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
                     } else if (isZeroAccessMessage(message)) {
                         // Sealed: nothing here can read it - only its MIME (above) is any use to the device.
                         text = ZERO_ACCESS_PLACEHOLDER_TEXT;
+                    } else if (isEndToEndEncryptedMessage(message)) {
+                        // Encrypted by its sender: unreadable here too - its MIME is for a device that holds the keys.
+                        text = ENCRYPTED_PLACEHOLDER_TEXT;
                     } else if (wantsHtml && message.sanitizedHtmlBlobKey) {
                         type = BODY_TYPE_HTML;
                         text = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
@@ -332,7 +335,11 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
             : isZeroAccessMessage(message)
               ? ZERO_ACCESS_MESSAGE_CLASS
               : undefined;
-        const fallbackBody: string = isZeroAccessMessage(message) ? ZERO_ACCESS_PLACEHOLDER_TEXT : message.bodyPreview;
+        const fallbackBody: string = isZeroAccessMessage(message)
+            ? ZERO_ACCESS_PLACEHOLDER_TEXT
+            : isEndToEndEncryptedMessage(message)
+              ? ENCRYPTED_PLACEHOLDER_TEXT
+              : message.bodyPreview;
 
         // MS-ASEMAIL2 `LastVerbExecuted`/`LastVerbExecutionTime`: the device's "replied"/"forwarded" icon keys
         // off this, not `Read`/`Flag` - `Message.flags.answered`/`forwarded` already tracked whether, but with

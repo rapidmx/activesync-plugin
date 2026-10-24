@@ -19,7 +19,7 @@ import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { createHash } from "crypto";
 import { AuditLogUtils, FolderType } from "@rapidmx/restapi";
 import { fakeMailAclUtils, TRUSTED_STRANGER_USER } from "../mailAccessTestUtils.js";
-import { ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
+import { ENCRYPTED_PLACEHOLDER_TEXT, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
 
 describe("ItemOperationsCommand Tests (guard clause only)", () => {
     it("handle() throws INTERNAL_ERROR when a required dependency is not set.", async () => {
@@ -416,6 +416,14 @@ describe("ItemOperationsCommand - zero-access message", () => {
             expect(childText(body, "Type")).toBe("1");
             expect(childText(body, "Data")).toBe(ZERO_ACCESS_PLACEHOLDER_TEXT);
         }
+        expect(get).not.toHaveBeenCalled();
+    });
+
+    it("serves the explanation for a message its sender encrypted end to end (S/MIME or OpenPGP)", async () => {
+        const { command, get } = build();
+        command.messageRepo.findOne.mockResolvedValue({ uid: "m1", folderUid: "f1", mailboxUid: "mbx", subject: "Hi", encrypted: true });
+        const body = bodyOf(await fetch(command, "1"));
+        expect(childText(body, "Data")).toBe(ENCRYPTED_PLACEHOLDER_TEXT);
         expect(get).not.toHaveBeenCalled();
     });
 });

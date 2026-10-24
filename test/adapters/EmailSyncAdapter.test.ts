@@ -11,7 +11,7 @@ import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { element, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
 import { EmailSyncAdapter } from "../../src/adapters/EmailSyncAdapter.js";
 import { decodeTimeZoneInformation } from "../../src/TimeZoneInfo.js";
-import { ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
+import { ENCRYPTED_PLACEHOLDER_TEXT, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
 import { FolderType, MessageImportance, RecipientType, type Mailbox, type Message } from "@rapidmx/restapi";
 
 /** `EmailSyncAdapter` is abstract (it needs a backend-specific `labelClass`, supplied by
@@ -743,6 +743,26 @@ describe("EmailSyncAdapter Tests", () => {
                     const body = rendered.children.find((c) => c.tag === "Body")!;
                     expect(fieldOf(body, "Data")).toBe(ZERO_ACCESS_PLACEHOLDER_TEXT);
                     expect(fieldOf(body, "EstimatedDataSize")).toBe(String(Buffer.byteLength(ZERO_ACCESS_PLACEHOLDER_TEXT)));
+                }
+                expect(get).not.toHaveBeenCalled();
+            });
+        });
+
+        describe("end-to-end encrypted message (S/MIME or OpenPGP)", () => {
+            const encrypted = { ...baseMessage, bodyPreview: "", encrypted: true } as Message;
+
+            it("Sends its MIME verbatim for Type 4, and the explanation for any other type or none, never parsing the ciphertext.", async () => {
+                const { adapter, get } = buildAdapter();
+                const pgpMime = 'Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary=x\r\n\r\n--x--';
+                get.mockResolvedValue(Buffer.from(pgpMime));
+                const [mime] = await adapter.toApplicationDataBatch([encrypted], { type: "4" });
+                expect(fieldOf(mime.children.find((c) => c.tag === "Body")!, "Data")).toBe(pgpMime);
+                expect(fieldOf(mime, "MessageClass")).toBeUndefined();
+
+                get.mockClear();
+                for (const preference of [{ type: "1" }, { type: "2" }, undefined]) {
+                    const [rendered] = await adapter.toApplicationDataBatch([encrypted], preference);
+                    expect(fieldOf(rendered.children.find((c) => c.tag === "Body")!, "Data")).toBe(ENCRYPTED_PLACEHOLDER_TEXT);
                 }
                 expect(get).not.toHaveBeenCalled();
             });

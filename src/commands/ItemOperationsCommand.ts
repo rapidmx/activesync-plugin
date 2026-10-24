@@ -27,7 +27,7 @@ import { hasLiveSendLease, type MessageMovePlan, planMessageMove } from "../Mess
 import { truncateUtf8 } from "../MimeHeaderUtils.js";
 import { EasAuditLog } from "../EasAuditLog.js";
 import { EasLiveUpdates } from "../EasLiveUpdates.js";
-import { isZeroAccessMessage, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../ZeroAccess.js";
+import { ENCRYPTED_PLACEHOLDER_TEXT, isEndToEndEncryptedMessage, isZeroAccessMessage, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../ZeroAccess.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Caps how many messages `emptyFolderContents`/`moveConversation` process per backing `find()`/delete-batch
@@ -290,6 +290,8 @@ export abstract class ItemOperationsCommand implements EasCommandHandler {
         } else if (isZeroAccessMessage(message)) {
             // Sealed: only its MIME (above) is any use to the device - see `ZeroAccess.ts`.
             bodyText = ZERO_ACCESS_PLACEHOLDER_TEXT;
+        } else if (isEndToEndEncryptedMessage(message)) {
+            bodyText = ENCRYPTED_PLACEHOLDER_TEXT;
         } else if (message.sanitizedHtmlBlobKey) {
             bodyType = "2";
             bodyText = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");

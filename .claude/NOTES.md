@@ -1409,3 +1409,11 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
 - `isZeroAccessMessage()` reads `zeroAccess` structurally, because this repo builds against a published `@rapidmx/restapi` that predates the field. Simplify it once the dependency is bumped.
 - **Not done yet: the write paths.** Drafts and sent items saved over EAS (`EmailSyncAdapter` drafts, `ComposeMailCommand`) still store plaintext. They need restapi's `ZeroAccessWriter`, which is only usable after a restapi release.
 - **Known limits for a sealed original:** MeetingResponse and SmartReply/SmartForward can't read it server-side.
+
+## 2026-10-24 - End-to-end encrypted bodies (OpenPGP interoperability)
+
+- **`ZeroAccess.ts`: `isEndToEndEncryptedMessage()` (`Message.encrypted`) and `ENCRYPTED_PLACEHOLDER_TEXT`.**
+  - A message its sender encrypted (S/MIME, OpenPGP/MIME, or inline OpenPGP since restapi's OpenPGP interop work) can't be read by the server.
+  - Body Type 4 still serves the raw MIME verbatim, so a device app holding the keys decrypts it.
+  - Types 1/2, or no BodyPreference, get the explanation instead of an empty body. This applies to `EmailSyncAdapter.resolveBodies`/`render` and `ItemOperationsCommand`.
+  - `MessageClass` is unchanged; only zero-access mail is marked `IPM.Note.SMIME`.

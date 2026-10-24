@@ -16,6 +16,17 @@ export const ZERO_ACCESS_MESSAGE_CLASS = "IPM.Note.SMIME";
 export const ZERO_ACCESS_PLACEHOLDER_TEXT =
     "This message is encrypted. Read it in RapidMX, or install your RapidMX encryption keys on this device to read it here.";
 
+/** The body a device gets in place of an end-to-end encrypted message's text (S/MIME or OpenPGP - @rapidmx/restapi
+ * `specs/end-to-end_encryption.md` *OpenPGP Interoperability*) when it asks for anything but its MIME: this server can't read it
+ * either, so only the MIME is any use, to a mail app holding the recipient's keys. */
+export const ENCRYPTED_PLACEHOLDER_TEXT =
+    "This message is end-to-end encrypted. Read it in RapidMX, or in a mail app on this device that has your encryption keys.";
+
+/** Whether `message` is end-to-end encrypted by its sender (`Message.encrypted`: S/MIME, OpenPGP/MIME or inline OpenPGP). */
+export function isEndToEndEncryptedMessage(message: object): boolean {
+    return (message as { encrypted?: unknown }).encrypted === true;
+}
+
 /** Whether `message` is stored zero-access encrypted (`Message.zeroAccess`) - read structurally, so this works against a
  * @rapidmx/restapi that predates the field. */
 export function isZeroAccessMessage(message: object): boolean {
