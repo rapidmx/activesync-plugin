@@ -1963,7 +1963,7 @@ describe("Route:EasRouteMongo Tests", () => {
                 const mailbox: any = await createMailbox(owner.uid);
                 mailbox.zeroAccessKeys = [await testZeroAccessKey()];
                 mailbox.zeroAccessTypes = { tasks: true };
-                await mailboxRepo.save(mailbox as any);
+                await mailboxRepo.save(mailbox);
                 await provisionDevice("dev1");
                 const folder = await createFolderWithAcl(mailbox.uid, { name: "Tasks", type: FolderType.TASKS });
                 const syncKey = await initialSyncKey("Tasks", folder.uid);

@@ -24,6 +24,8 @@ import {
     RecoverableRepoUtils,
     refreshFolderCounts,
     type Mailbox,
+    newZeroAccessRecordSealer,
+    type ZeroAccessRecordSealer,
 } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, findChildren, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
@@ -46,7 +48,6 @@ import { EasLiveUpdates, type LiveUpdateAction } from "../EasLiveUpdates.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "../adapters/EasCollectionSyncAdapter.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
-import { newZeroAccessRecordSealer, type ZeroAccessRecordSealer } from "@rapidmx/restapi";
 
 /** The zero-access data type of each EAS collection class sealed field by field (mail is sealed whole, on delivery). */
 const COLLECTION_DATA_TYPES: Readonly<Record<string, "calendar" | "contacts" | "tasks">> = { Calendar: "calendar", Contacts: "contacts", Tasks: "tasks" };
