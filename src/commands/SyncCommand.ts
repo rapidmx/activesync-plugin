@@ -25,6 +25,10 @@ import {
     refreshFolderCounts,
     type Mailbox,
     newZeroAccessRecordSealer,
+    hasSealedFields,
+    MeetingInviteSender,
+    protectedInvitationsPending,
+    type InvitationContent,
     type ZeroAccessRecordSealer,
 } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
@@ -201,6 +205,8 @@ export abstract class SyncCommand implements EasCommandHandler {
      * `ZeroAccessRecordSealer`). Optional: without it nothing is sealed. */
     protected encryptionPolicyClass?: any;
     private recordSealer?: ZeroAccessRecordSealer;
+    /** Sends the invitations of a meeting a device creates in a protected calendar (`inviteProtectedAdd()`). Built on first use. */
+    private inviteSender?: MeetingInviteSender;
 
     @Config("mail:eas:sync_window_size", DEFAULT_WINDOW_SIZE)
     private windowSize: number = DEFAULT_WINDOW_SIZE;
@@ -814,8 +820,10 @@ export abstract class SyncCommand implements EasCommandHandler {
             const defaults = adapter.newEntityDefaults ? adapter.newEntityDefaults(mailbox) : {};
             const partial = await adapter.fromApplicationData(appData, undefined, mailbox);
             const body: any = { ...defaults, ...partial, mailboxUid: folder.mailboxUid, folderUid: folder.uid };
+            const content: InvitationContent | undefined = round.collectionClass === "Calendar" ? invitationContentOf(body) : undefined;
             await this.sealDeviceWrite(round, body, undefined);
             const created = await repo.create(body, { ignoreACL: true });
+            await this.inviteProtectedAdd(repo, created, content);
             this.noteWrite(round, created);
             this.publishWrite(round, "create", created);
             if (clientId) {
@@ -899,6 +907,26 @@ export abstract class SyncCommand implements EasCommandHandler {
             return;
         }
         await this.recordSealer.sealWrite(type, await round.getFolderMailbox(), body, existing);
+    }
+
+    /**
+     * Sends the invitations of a meeting a device just added to a protected calendar, from the plaintext the device sent (restapi
+     * `specs/search.md` §3 *What It Covers*, *Calendar invitations*): the stored copy is sealed, so restapi's `MeetingSchedulingJob` won't.
+     * Only an Add carries the whole content - a Change sends back the placeholders the device was shown - so a meeting changed on a device
+     * isn't re-sent until it is saved where its content can be read. Never throws.
+     */
+    private async inviteProtectedAdd(repo: RepoUtils<any>, created: any, content: InvitationContent | undefined): Promise<void> {
+        if (!content || !hasSealedFields(created) || !protectedInvitationsPending(created)) {
+            return;
+        }
+        try {
+            this.inviteSender ??= await this._objectFactory!.newInstance(MeetingInviteSender, { name: "MeetingInviteSender", args: [this.mailboxRepo, undefined] });
+            await this.inviteSender.sendProtectedInvitations(created, content, repo, "SyncCommand");
+            /* v8 ignore start -- only building the sender can throw (sendProtectedInvitations() never does); the item is already stored */
+        } catch (err: any) {
+            this.logger?.warn(`SyncCommand: failed to send the invitations for protected event ${created?.uid}: ${err?.message ?? err}`);
+        }
+        /* v8 ignore stop */
     }
 
     private async applyDelete(round: CollectionRound, el: WbxmlElement): Promise<WbxmlElement | undefined> {
@@ -1062,4 +1090,11 @@ function selectBestBodyPreference(bodyPreferenceEls: WbxmlElement[]): WbxmlEleme
         }
     }
     return bodyPreferenceEls[0];
+}
+
+/** A calendar Add's title, location and description as the device sent them, before they are sealed - `undefined` without a title. */
+function invitationContentOf(body: any): InvitationContent | undefined {
+    const text = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
+    const title: string | undefined = text(body?.title);
+    return title ? { title, location: text(body.location), description: text(body.description), descriptionHtml: text(body.descriptionHtml) } : undefined;
 }

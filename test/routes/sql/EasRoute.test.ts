@@ -1797,6 +1797,52 @@ describe("Route:EasRouteSQL Tests", () => {
                 expect(new Date(allDay!.endDate).toISOString()).toBe("2026-10-09T00:00:00.000Z");
             });
 
+            it("Seals a meeting a device adds to a protected calendar and sends its invitations at once, with the real title.", async () => {
+                const mailbox: any = await createMailbox(owner.uid);
+                mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+                mailbox.zeroAccessTypes = { calendar: true };
+                await mailboxRepo.save(mailbox);
+                await provisionDevice("dev1");
+                const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                const syncKey = await initialSyncKey("Calendar", folder.uid);
+                const transport = objectFactory.getInstance<RecordingMailTransport>("MailTransport")!;
+                transport.sent = [];
+
+                const response = await postWbxml(
+                    "Sync",
+                    "dev1",
+                    syncRequestWithCommands(syncKey, "Calendar", folder.uid, [
+                        element(WbxmlCodePage.AirSync, "Add", [
+                            textElement(WbxmlCodePage.AirSync, "ClientId", "client-1"),
+                            element(WbxmlCodePage.AirSync, "ApplicationData", [
+                                textElement(WbxmlCodePage.Calendar, "Subject", "CANARY board meeting"),
+                                textElement(WbxmlCodePage.Calendar, "Location", "CANARY room 4"),
+                                textElement(WbxmlCodePage.Calendar, "StartTime", "20260301T090000Z"),
+                                textElement(WbxmlCodePage.Calendar, "EndTime", "20260301T093000Z"),
+                                element(WbxmlCodePage.Calendar, "Attendees", [
+                                    element(WbxmlCodePage.Calendar, "Attendee", [
+                                        textElement(WbxmlCodePage.Calendar, "Email", "bob@example.org"),
+                                        textElement(WbxmlCodePage.Calendar, "Name", "Bob"),
+                                        textElement(WbxmlCodePage.Calendar, "AttendeeType", "1"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                );
+
+                const add = findChild(findChild(collectionOf(response), "Responses")!, "Add")!;
+                expect(childText(add, "Status")).toBe("1");
+                const created: any = await calendarEventRepo.findOne({ where: { uid: childText(add, "ServerId")! } });
+                expect(created?.title).toBe("Protected event");
+                expect(created?.sealedFields?.location).toEqual(expect.any(String));
+                expect(JSON.stringify(created)).not.toContain("CANARY");
+                expect(created?.inviteSequenceSent).toBe(created?.sequence);
+                expect(transport.sent).toHaveLength(1);
+                expect(transport.sent[0].envelopeTo).toEqual(["bob@example.org"]);
+                expect(transport.sent[0].raw.toString()).toContain("Invitation: CANARY board meeting");
+            });
+
             it("Creates a calendar event via a client-originated Add, assigning a unique icalUid and sequence 0.", async () => {
                 const mailbox = await createMailbox(owner.uid);
                 await provisionDevice("dev1");
