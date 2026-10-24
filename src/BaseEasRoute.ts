@@ -21,6 +21,7 @@ import type { EasCommandHandler } from "./EasCommandHandler.js";
 import { persistDeviceSyncState } from "./EasSyncKeyUtils.js";
 import { Mailbox, resolveCallerMailboxUid } from "@rapidmx/restapi";
 import { DeviceSyncState } from "./models/DeviceSyncState.js";
+import { recordSyncClient } from "./SyncClientRecorder.js";
 const { Config, Init, Logger } = ObjectDecorators;
 const { Auth, Options, Post, Request, Response, User: AuthUser } = RouteDecorators;
 
@@ -113,6 +114,9 @@ export function isValidDeviceId(deviceId: string | undefined): deviceId is strin
 export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox = Mailbox> {
     protected abstract deviceSyncStateClass: any;
     protected abstract mailboxClass: any;
+    /** `EasCollectionState`, to tell which data types a device syncs (`SyncClientRecorder.ts`). Optional: without it a device is
+     * recorded with no types. */
+    protected collectionStateClass?: any;
 
     /** Command handler classes to instantiate (one each) in `@Init`. Empty until a concrete command lands -
      * every request is then answered with HTTP 501 (see `dispatch()`), which is the correct, honest behavior
@@ -124,6 +128,7 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
 
     private deviceSyncStateRepo?: RepoUtils<D>;
     private mailboxRepo?: RepoUtils<M>;
+    private collectionStateRepo?: RepoUtils<any>;
     private readonly handlers = new Map<string, EasCommandHandler>();
 
     /** Largest request body `dispatch()` accepts (HTTP 413 beyond it). */
@@ -143,6 +148,9 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
         }
         if (!this.mailboxRepo && this.mailboxClass) {
             this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
+        if (!this.collectionStateRepo && this.collectionStateClass) {
+            this.collectionStateRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.collectionStateClass.name, args: [this.collectionStateClass] });
         }
         for (const HandlerClass of this.commandHandlerClasses) {
             const handler: EasCommandHandler = await this._objectFactory.newInstance(HandlerClass);
@@ -273,6 +281,12 @@ export abstract class BaseEasRoute<D extends DeviceSyncState, M extends Mailbox 
             await persistDeviceSyncState(deviceSyncState, this.deviceSyncStateRepo, { lastSyncAt: new Date() });
         } catch (err: any) {
             this.logger?.warn(`BaseEasRoute: failed to record lastSyncAt for device ${deviceId}: ${err?.message}`);
+        }
+        // Which devices sync the mailbox, and what: restapi's zero-access defaults and warnings go by it. Bookkeeping too.
+        try {
+            await recordSyncClient({ mailboxRepo: this.mailboxRepo, collectionStateRepo: this.collectionStateRepo }, mailboxUid, deviceId, deviceType);
+        } catch (err: any) {
+            this.logger?.warn(`BaseEasRoute: failed to record device ${deviceId} on mailbox ${mailboxUid}: ${err?.message}`);
         }
 
         if (!response) {

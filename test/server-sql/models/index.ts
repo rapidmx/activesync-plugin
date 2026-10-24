@@ -6,6 +6,7 @@ export {
     AttachmentSQL,
     AuditLogEntrySQL,
     CalendarEventSQL,
+    EncryptionPolicySQL,
     ContactSQL,
     FolderSQL,
     LabelSQL,

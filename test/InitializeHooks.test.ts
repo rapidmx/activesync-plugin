@@ -66,6 +66,7 @@ const cases: Case[] = [
         repos: [
             ["deviceSyncStateRepo", "deviceSyncStateClass", RepoUtils],
             ["mailboxRepo", "mailboxClass", RepoUtils],
+            ["collectionStateRepo", "collectionStateClass", RepoUtils],
         ],
     },
     {
@@ -210,6 +211,10 @@ describe("@Init hooks", () => {
                 if ("emailAdapterClass" in obj) {
                     obj.emailAdapter = {};
                 }
+                // The zero-access record sealer of a backend with an EncryptionPolicy model (restapi builds it): already set, it is kept.
+                if ("encryptionPolicyClass" in obj) {
+                    obj.recordSealer = {};
+                }
 
                 await obj[c.hook]();
 
@@ -235,6 +240,9 @@ describe("@Init hooks", () => {
                 }
                 if ("emailAdapterClass" in obj) {
                     obj.emailAdapterClass = undefined;
+                }
+                if ("encryptionPolicyClass" in obj) {
+                    obj.encryptionPolicyClass = undefined;
                 }
 
                 await obj[c.hook]();

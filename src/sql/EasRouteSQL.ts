@@ -5,6 +5,7 @@
 import { MailboxSQL } from "@rapidmx/restapi/sql";
 import { RouteDecorators } from "@rapidrest/service-core";
 import { DeviceSyncStateSQL } from "../models/sql/DeviceSyncStateSQL.js";
+import { EasCollectionStateSQL } from "../models/sql/EasCollectionStateSQL.js";
 import { BaseEasRoute } from "../BaseEasRoute.js";
 import { ProvisionCommand } from "../commands/ProvisionCommand.js";
 import { PingCommandSQL } from "../commands/sql/PingCommandSQL.js";
@@ -32,6 +33,7 @@ const { Route } = RouteDecorators;
 export class EasRouteSQL extends BaseEasRoute<DeviceSyncStateSQL, MailboxSQL> {
     protected deviceSyncStateClass: any = DeviceSyncStateSQL;
     protected mailboxClass: any = MailboxSQL;
+    protected collectionStateClass: any = EasCollectionStateSQL;
     protected commandHandlerClasses: any[] = [
         ProvisionCommand,
         FolderSyncCommandSQL,

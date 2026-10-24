@@ -1417,3 +1417,15 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
   - Body Type 4 still serves the raw MIME verbatim, so a device app holding the keys decrypts it.
   - Types 1/2, or no BodyPreference, get the explanation instead of an empty body. This applies to `EmailSyncAdapter.resolveBodies`/`render` and `ItemOperationsCommand`.
   - `MessageClass` is unchanged; only zero-access mail is marked `IPM.Note.SMIME`.
+
+### 2026-10-24: Recording devices on the mailbox (zero-access per-type defaults)
+- `SyncClientRecorder.recordSyncClient()` runs after every command, as bookkeeping (failures are logged).
+- It records the device on `Mailbox.syncClients.activesync.devices` as `{ id, model: DeviceType, types, lastSeenAt }`.
+  - `types` come from the device's `EasCollectionState.collectionClass` values: Email, Calendar, Contacts, Tasks.
+- Writes are throttled: one mailbox read per request, a refresh every 6 h, devices expire after 90 days, and at most 20 are kept.
+- restapi uses it for the zero-access defaults (a type a phone syncs defaults to off) and for the settings warnings.
+- `collectionStateClass` is set on `EasRouteMongo`/`EasRouteSQL`.
+- (Phase 3) `SyncCommand.sealDeviceWrite()` passes every Calendar, Contacts and Tasks Add and Change from a device through restapi's `ZeroAccessRecordSealer` (`encryptionPolicyClass` on `SyncCommandMongo`/`SQL`) before the repo write.
+  - A placeholder the device sends back unchanged is ignored; new plaintext is sealed when that type is protected for the folder's mailbox.
+  - Devices see the placeholders, e.g. "Protected task".
+- The test servers' model indexes must export `EncryptionPolicyMongo`/`SQL`; SQL otherwise reports "No metadata".

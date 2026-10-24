@@ -8,6 +8,7 @@
 // architecture plan's "Testing" section. `Ping`'s Redis-dependent logic is tested separately
 // (test/eas/commands/PingCommand.test.ts) with a fake Redis client, mirroring service-core's own documented
 // precedent for that same infrastructure gap (no real Redis is part of this repo's test setup either).
+import { testZeroAccessKey } from "../../zeroAccessTestKey.js";
 import * as http from "http";
 import config from "../../config.js";
 import { request } from "@rapidrest/service-core/test";
@@ -1956,6 +1957,34 @@ describe("Route:EasRouteMongo Tests", () => {
                 expect(childText(add, "ClientId")).toBe("client-1");
                 expect(childText(add, "Status")).toBe("6");
                 expect(findChild(add, "ServerId")).toBeUndefined();
+            });
+
+            it("Seals a task a device adds to a mailbox whose zero-access covers tasks, and keeps it sealed when the device sends back the placeholder.", async () => {
+                const mailbox: any = await createMailbox(owner.uid);
+                mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+                mailbox.zeroAccessTypes = { tasks: true };
+                await mailboxRepo.save(mailbox as any);
+                await provisionDevice("dev1");
+                const folder = await createFolderWithAcl(mailbox.uid, { name: "Tasks", type: FolderType.TASKS });
+                const syncKey = await initialSyncKey("Tasks", folder.uid);
+
+                const response = await postWbxml(
+                    "Sync",
+                    "dev1",
+                    syncRequestWithCommands(syncKey, "Tasks", folder.uid, [
+                        element(WbxmlCodePage.AirSync, "Add", [
+                            textElement(WbxmlCodePage.AirSync, "ClientId", "client-1"),
+                            element(WbxmlCodePage.AirSync, "ApplicationData", [textElement(WbxmlCodePage.Tasks, "Subject", "CANARY renew passport")]),
+                        ]),
+                    ]),
+                );
+
+                const add = findChild(findChild(collectionOf(response), "Responses")!, "Add")!;
+                expect(childText(add, "Status")).toBe("1");
+                const created: any = await taskRepo.findOne({ uid: childText(add, "ServerId") });
+                expect(created?.title).toBe("Protected task");
+                expect(created?.sealedFields?.title).toEqual(expect.any(String));
+                expect(JSON.stringify(created)).not.toContain("CANARY");
             });
 
             it("Creates a task via a client-originated Add.", async () => {

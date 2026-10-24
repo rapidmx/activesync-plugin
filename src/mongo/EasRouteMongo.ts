@@ -5,6 +5,7 @@
 import { MailboxMongo } from "@rapidmx/restapi/mongo";
 import { RouteDecorators } from "@rapidrest/service-core";
 import { DeviceSyncStateMongo } from "../models/mongo/DeviceSyncStateMongo.js";
+import { EasCollectionStateMongo } from "../models/mongo/EasCollectionStateMongo.js";
 import { BaseEasRoute } from "../BaseEasRoute.js";
 import { ProvisionCommand } from "../commands/ProvisionCommand.js";
 import { PingCommandMongo } from "../commands/mongo/PingCommandMongo.js";
@@ -32,6 +33,7 @@ const { Route } = RouteDecorators;
 export class EasRouteMongo extends BaseEasRoute<DeviceSyncStateMongo, MailboxMongo> {
     protected deviceSyncStateClass: any = DeviceSyncStateMongo;
     protected mailboxClass: any = MailboxMongo;
+    protected collectionStateClass: any = EasCollectionStateMongo;
     protected commandHandlerClasses: any[] = [
         ProvisionCommand,
         FolderSyncCommandMongo,

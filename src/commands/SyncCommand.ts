@@ -46,6 +46,10 @@ import { EasLiveUpdates, type LiveUpdateAction } from "../EasLiveUpdates.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
 import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "../adapters/EasCollectionSyncAdapter.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
+import { newZeroAccessRecordSealer, type ZeroAccessRecordSealer } from "@rapidmx/restapi";
+
+/** The zero-access data type of each EAS collection class sealed field by field (mail is sealed whole, on delivery). */
+const COLLECTION_DATA_TYPES: Readonly<Record<string, "calendar" | "contacts" | "tasks">> = { Calendar: "calendar", Contacts: "contacts", Tasks: "tasks" };
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Default most item changes reported per collection per `Sync` round. */
@@ -192,6 +196,10 @@ export abstract class SyncCommand implements EasCommandHandler {
     protected abstract collectionStateClass: any;
     protected abstract collectionChunkClass: any;
     protected abstract auditLogClass: any;
+    /** The backend's `EncryptionPolicy`, for sealing protected calendar events, contacts and tasks a device writes (restapi
+     * `ZeroAccessRecordSealer`). Optional: without it nothing is sealed. */
+    protected encryptionPolicyClass?: any;
+    private recordSealer?: ZeroAccessRecordSealer;
 
     @Config("mail:eas:sync_window_size", DEFAULT_WINDOW_SIZE)
     private windowSize: number = DEFAULT_WINDOW_SIZE;
@@ -270,6 +278,9 @@ export abstract class SyncCommand implements EasCommandHandler {
         }
         if (!this.auditLogUtils && this.auditLogRepo) {
             this.auditLogUtils = await this._objectFactory.newInstance(AuditLogUtils, { name: this.auditLogClass.name, args: [this.auditLogRepo] });
+        }
+        if (!this.recordSealer && this.encryptionPolicyClass) {
+            this.recordSealer = await newZeroAccessRecordSealer(this._objectFactory, this.encryptionPolicyClass);
         }
     }
 
@@ -801,10 +812,9 @@ export abstract class SyncCommand implements EasCommandHandler {
             const mailbox = await round.getMailbox();
             const defaults = adapter.newEntityDefaults ? adapter.newEntityDefaults(mailbox) : {};
             const partial = await adapter.fromApplicationData(appData, undefined, mailbox);
-            const created = await repo.create(
-                { ...defaults, ...partial, mailboxUid: folder.mailboxUid, folderUid: folder.uid } as any,
-                { ignoreACL: true },
-            );
+            const body: any = { ...defaults, ...partial, mailboxUid: folder.mailboxUid, folderUid: folder.uid };
+            await this.sealDeviceWrite(round, body, undefined);
+            const created = await repo.create(body, { ignoreACL: true });
             this.noteWrite(round, created);
             this.publishWrite(round, "create", created);
             if (clientId) {
@@ -863,7 +873,9 @@ export abstract class SyncCommand implements EasCommandHandler {
         }
         try {
             const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox());
-            const updated = await repo.update({ uid: existing.uid, version: existing.version, ...partial }, asEntity(repo, existing), { ignoreACL: true });
+            const patch: any = { uid: existing.uid, version: existing.version, ...partial };
+            await this.sealDeviceWrite(round, patch, existing);
+            const updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
             this.noteWrite(round, updated);
             this.publishWrite(round, "update", updated);
             return undefined;
@@ -873,6 +885,19 @@ export abstract class SyncCommand implements EasCommandHandler {
             }
             return this.statusResponseElement("Change", serverId, "6");
         }
+    }
+
+    /**
+     * Seals what a device writes to a calendar, contacts or tasks collection when zero-access covers that type for the folder's mailbox
+     * (restapi `specs/search.md` §3 *What It Covers*): the device sends plaintext, which is never stored, and a placeholder it was shown
+     * and sends back unchanged leaves the protected value alone.
+     */
+    private async sealDeviceWrite(round: CollectionRound, body: any, existing: any): Promise<void> {
+        const type = COLLECTION_DATA_TYPES[round.collectionClass];
+        if (!type || !this.recordSealer) {
+            return;
+        }
+        await this.recordSealer.sealWrite(type, await round.getFolderMailbox(), body, existing);
     }
 
     private async applyDelete(round: CollectionRound, el: WbxmlElement): Promise<WbxmlElement | undefined> {
