@@ -29,6 +29,8 @@ import {
     newZeroAccessWriter,
     hasSealedFields,
     PROTECTED_FIELDS,
+    PROTECTED_SUBJECT,
+    SEARCH_REINDEX,
     type BlobStore,
     deleteBlobsIfUnreferenced,
     messageBlobReferenceSources,
@@ -62,6 +64,10 @@ import type { EasCollectionState } from "../models/EasCollectionState.js";
 
 /** The zero-access data type of each EAS collection class sealed field by field (mail is sealed whole, on delivery). */
 const COLLECTION_DATA_TYPES: Readonly<Record<string, "calendar" | "contacts" | "tasks">> = { Calendar: "calendar", Contacts: "contacts", Tasks: "tasks" };
+/** The `Message` fields a device's Change can write that restapi's `SearchIndexJob` puts in a message's search document. */
+const SEARCH_INDEXED_FIELDS: readonly string[] = ["subject", "recipients", "flags", "bodyBlobKey"];
+/** The fields of an event made from a zero-access invitation that its `sealedContent` holds, sealed whole (restapi `specs/search.md` §4). */
+const SEALED_CONTENT_FIELDS: readonly string[] = ["title", "location", "description", "descriptionHtml"];
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** Default most item changes reported per collection per `Sync` round. */
@@ -841,9 +847,10 @@ export abstract class SyncCommand implements EasCommandHandler {
             const content: InvitationContent | undefined = round.collectionClass === "Calendar" ? invitationContentOf(body) : undefined;
             await this.sealDeviceWrite(round, body, undefined);
             const created = await repo.create(body, { ignoreACL: true });
-            await this.inviteProtectedAdd(repo, created, content);
-            this.noteWrite(round, created);
-            this.publishWrite(round, "create", created);
+            // The invitations' claim writes the row again: that later write is the device's own too, or its Add would come back as a Change.
+            const stored = (await this.inviteProtectedAdd(repo, created, content)) ?? created;
+            this.noteWrite(round, stored);
+            this.publishWrite(round, "create", stored);
             if (clientId) {
                 round.clientIds.set(clientId, created.uid);
             }
@@ -903,6 +910,11 @@ export abstract class SyncCommand implements EasCommandHandler {
         try {
             const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox(), this.draftWriteOptions(round, existing.uid));
             const patch: any = { uid: existing.uid, version: existing.version, ...partial };
+            if (round.collectionClass === "Email" && SEARCH_INDEXED_FIELDS.some((field) => field in patch)) {
+                // A direct write, so restapi's message route never clears the search stamp: the document SearchIndexJob built from the
+                // old subject, recipients, flags or body (readable, when a device's edit is what seals the draft) would stay for good.
+                Object.assign(patch, SEARCH_REINDEX);
+            }
             await this.sealDeviceWrite(round, patch, existing);
             const updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
             if (patch.zeroAccess) {
@@ -929,8 +941,28 @@ export abstract class SyncCommand implements EasCommandHandler {
      * A sealed list shown as an empty one (a contact's phones, addresses or categories) can't be changed from a device: the device was
      * shown none of the list, so anything it sends is its additions alone, and sealing that would replace the whole hidden list. Such a
      * change is refused (Status 6, like a sealed draft's subject-only change) rather than lose the entries the device never saw.
+     *
+     * An event made from a zero-access invitation (`sealedContent`) keeps its own sealing, whether or not the calendar is protected, as
+     * restapi's calendar route does (`BaseCalendarEventRoute.keepSealed()`): it is never field-sealed, which would leave the row with two
+     * sealed copies and web-client showing the `sealedContent` one. The placeholders the device was shown and sends back (the `[...]`
+     * title, an empty location) are dropped. A real edit of its title or location is refused (Status 6): resealing `sealedContent` takes
+     * every one of its fields, and the device was shown none of them.
      */
     private async sealDeviceWrite(round: CollectionRound, body: any, existing: any): Promise<void> {
+        if (round.collectionClass === "Calendar" && existing?.sealedContent) {
+            for (const field of SEALED_CONTENT_FIELDS) {
+                if (!(field in body)) {
+                    continue;
+                }
+                const value: unknown = body[field];
+                if (value == null || value === "" || value === existing[field] || (field === "title" && value === PROTECTED_SUBJECT)) {
+                    delete body[field];
+                } else {
+                    throw new Error(`The ${field} of this event is sealed with its invitation and can't be changed from a device.`);
+                }
+            }
+            return;
+        }
         const type = COLLECTION_DATA_TYPES[round.collectionClass];
         if (!type || !this.recordSealer) {
             return;
@@ -962,7 +994,17 @@ export abstract class SyncCommand implements EasCommandHandler {
         return {
             sealDraftBody: async (mime: Buffer) => {
                 const sealed = await writer.sealDraft(await round.getFolderMailbox(), mime, uid, new Date());
-                return sealed && { subject: sealed.subject, bodyPreview: sealed.bodyPreview, bodyBlobKey: sealed.bodyBlobKey, zeroAccess: sealed.zeroAccess, sanitizedHtmlBlobKey: null };
+                // Re-indexed as metadata only: a search document built while the draft was readable holds its subject and body.
+                return (
+                    sealed && {
+                        subject: sealed.subject,
+                        bodyPreview: sealed.bodyPreview,
+                        bodyBlobKey: sealed.bodyBlobKey,
+                        zeroAccess: sealed.zeroAccess,
+                        sanitizedHtmlBlobKey: null,
+                        ...SEARCH_REINDEX,
+                    }
+                );
             },
         };
     }
@@ -982,19 +1024,22 @@ export abstract class SyncCommand implements EasCommandHandler {
      * `specs/search.md` §3 *What It Covers*, *Calendar invitations*): the stored copy is sealed, so restapi's `MeetingSchedulingJob` won't.
      * Only an Add carries the whole content - a Change sends back the placeholders the device was shown - so a meeting changed on a device
      * isn't re-sent until it is saved where its content can be read. Never throws.
+     *
+     * Returns the row the invitations' claim wrote (a new `version` and `dateModified`), or `undefined` when nothing was claimed.
      */
-    private async inviteProtectedAdd(repo: RepoUtils<any>, created: any, content: InvitationContent | undefined): Promise<void> {
+    private async inviteProtectedAdd(repo: RepoUtils<any>, created: any, content: InvitationContent | undefined): Promise<any> {
         if (!content || !hasSealedFields(created) || !protectedInvitationsPending(created)) {
-            return;
+            return undefined;
         }
         try {
             // Unnamed, so it is this command's own: a named instance is shared through the factory, and another caller's (restapi's
             // MeetingSchedulingJob or calendar route) would come back with its own host and repositories.
             this.inviteSender ??= await this._objectFactory!.newInstance(MeetingInviteSender, { args: [this.mailboxRepo, undefined] });
-            await this.inviteSender.sendProtectedInvitations(created, content, repo, "SyncCommand");
+            return await this.inviteSender.sendProtectedInvitations(created, content, repo, "SyncCommand");
             /* v8 ignore start -- only building the sender can throw (sendProtectedInvitations() never does); the item is already stored */
         } catch (err: any) {
             this.logger?.warn(`SyncCommand: failed to send the invitations for protected event ${created?.uid}: ${err?.message ?? err}`);
+            return undefined;
         }
         /* v8 ignore stop */
     }

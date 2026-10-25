@@ -2429,6 +2429,170 @@ describe("Route:EasRouteMongo Tests", () => {
                 });
             });
 
+            describe("Third review fixes", () => {
+                const protect = async (types: Record<string, boolean>): Promise<any> => {
+                    const mailbox: any = await createMailbox(owner.uid);
+                    mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+                    mailbox.zeroAccessTypes = types;
+                    return await mailboxRepo.save(mailbox);
+                };
+                const textBody = (data: string) =>
+                    element(WbxmlCodePage.AirSyncBase, "Body", [textElement(WbxmlCodePage.AirSyncBase, "Type", "1"), textElement(WbxmlCodePage.AirSyncBase, "Data", data)]);
+                const responseOf = (response: WbxmlElement, tag: string) => findChild(findChild(collectionOf(response), "Responses") ?? element(WbxmlCodePage.AirSync, "Responses", []), tag);
+                const commandsFor = (response: WbxmlElement, serverId: string) =>
+                    (findChild(collectionOf(response), "Commands")?.children ?? []).filter((command: any) => childText(command, "ServerId") === serverId);
+                const add = (clientId: string, fields: WbxmlElement[]) =>
+                    element(WbxmlCodePage.AirSync, "Add", [textElement(WbxmlCodePage.AirSync, "ClientId", clientId), element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+                const change = (serverId: string, fields: WbxmlElement[], extra: WbxmlElement[] = []) =>
+                    element(WbxmlCodePage.AirSync, "Change", [textElement(WbxmlCodePage.AirSync, "ServerId", serverId), ...extra, element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+                const cal = (tag: string, value: string) => textElement(WbxmlCodePage.Calendar, tag, value);
+                const indexed = { searchIndexedAt: new Date(), searchIndexAttempts: 2, searchIndexError: "earlier failure" };
+
+                it("Sends a readable draft a device's edit seals back to the search index, so its readable search document is rebuilt as metadata only.", async () => {
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const readable = await createMessage(mailbox.uid, folder.uid, { subject: "Before zero-access", ...indexed });
+                    await blobStore().put(readable.bodyBlobKey, Buffer.from("Subject: Before zero-access\r\n\r\nold body"), { contentType: "message/rfc822" });
+
+                    const response = await postWbxml("Sync", "dev1", syncRequestWithCommands(await initialSyncKey("Email", folder.uid), "Email", folder.uid, [change(readable.uid, [textBody("new body")])]));
+
+                    expect(responseOf(response, "Change")).toBeUndefined();
+                    const sealed: any = await byUid(messageRepo, readable.uid);
+                    expect(sealed.zeroAccess).toBeTruthy();
+                    expect(sealed.searchIndexedAt ?? null).toBeNull();
+                    expect(sealed.searchIndexAttempts ?? null).toBeNull();
+                    expect(sealed.searchIndexError ?? null).toBeNull();
+                });
+
+                it("Sends a message whose flags a device changes back to the search index, and leaves one whose Change touches nothing indexed alone.", async () => {
+                    const mailbox = await createMailbox(owner.uid);
+                    await provisionDevice("dev1");
+                    const inbox = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+                    const flagged = await createMessage(mailbox.uid, inbox.uid, indexed);
+                    const untouched = await createMessage(mailbox.uid, inbox.uid, indexed);
+
+                    const response = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Email", inbox.uid), "Email", inbox.uid, [
+                            change(flagged.uid, [textElement(WbxmlCodePage.Email, "Read", "1")]),
+                            change(untouched.uid, [textElement(WbxmlCodePage.Email, "Importance", "2")]),
+                        ]),
+                    );
+
+                    expect(responseOf(response, "Change")).toBeUndefined();
+                    const read: any = await byUid(messageRepo, flagged.uid);
+                    expect(read.flags.read).toBe(true);
+                    expect(read.searchIndexedAt ?? null).toBeNull();
+                    expect((await byUid(messageRepo, untouched.uid)).searchIndexedAt).toBeTruthy();
+                });
+
+                it("Doesn't send a meeting a device adds to a protected calendar back to it as a Change once its invitations are claimed.", async () => {
+                    const mailbox = await protect({ calendar: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    objectFactory.getInstance<RecordingMailTransport>("MailTransport")!.sent = [];
+
+                    const added = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Calendar", folder.uid), "Calendar", folder.uid, [
+                            add("client-1", [
+                                cal("Subject", "Board prep"),
+                                cal("Location", "Room 4"),
+                                cal("StartTime", "20260301T090000Z"),
+                                cal("EndTime", "20260301T093000Z"),
+                                element(WbxmlCodePage.Calendar, "Attendees", [
+                                    element(WbxmlCodePage.Calendar, "Attendee", [cal("Email", "bob@example.org"), cal("Name", "Bob"), cal("AttendeeType", "1")]),
+                                ]),
+                            ]),
+                        ]),
+                    );
+                    const serverId = childText(responseOf(added, "Add")!, "ServerId")!;
+                    const stored: any = await byUid(calendarEventRepo, serverId);
+                    expect(stored.inviteSequenceSent).toBe(stored.sequence);
+                    expect(stored.version).toBeGreaterThan(0);
+                    expect(commandsFor(added, serverId)).toEqual([]);
+
+                    const next = await postWbxml("Sync", "dev1", syncRequest(childText(collectionOf(added), "SyncKey")!, "Calendar", folder.uid));
+                    expect(commandsFor(next, serverId)).toEqual([]);
+                });
+
+                it("Leaves an event made from a zero-access invitation (sealedContent) to its own sealing when a device changes it: the placeholders it sends back are dropped and a new title or location is refused.", async () => {
+                    const mailbox = await protect({ mail: true, calendar: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    const sealedContent = { keyFingerprint: "fp", sealed: "sealed-content" };
+                    const event: any = await createCalendarEvent(mailbox.uid, folder.uid, { title: "[...]", location: undefined, sealedContent });
+                    const syncKey = await initialSyncKey("Calendar", folder.uid);
+
+                    const moved = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(syncKey, "Calendar", folder.uid, [
+                            change(event.uid, [cal("Subject", "[...]"), cal("Location", ""), cal("StartTime", "20260101T120000Z"), cal("EndTime", "20260101T130000Z")]),
+                        ]),
+                    );
+                    expect(responseOf(moved, "Change")).toBeUndefined();
+                    const kept: any = await byUid(calendarEventRepo, event.uid);
+                    expect(new Date(kept.startDate).toISOString()).toBe("2026-01-01T12:00:00.000Z");
+                    expect(kept.title).toBe("[...]");
+                    expect(kept.location ?? null).toBeNull();
+                    expect(kept.sealedFields ?? null).toBeNull();
+                    expect(kept.sealedContent).toEqual(sealedContent);
+
+                    const renamed = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(moved), "SyncKey")!, "Calendar", folder.uid, [
+                            change(event.uid, [cal("Subject", "Q3 review (moved)")]),
+                            change(event.uid, [cal("Subject", "[...]"), cal("Location", "Room 9")]),
+                        ]),
+                    );
+                    expect(findChildren(findChild(collectionOf(renamed), "Responses")!, "Change").map((el) => childText(el, "Status"))).toEqual(["6", "6"]);
+                    const unchanged: any = await byUid(calendarEventRepo, event.uid);
+                    expect(unchanged.version).toBe(kept.version);
+                    expect(unchanged.title).toBe("[...]");
+                    expect(unchanged.sealedFields ?? null).toBeNull();
+                });
+
+                it("Leaves an occurrence of a sealedContent series to its own sealing on an InstanceId Change, refusing a new title.", async () => {
+                    const mailbox = await protect({ mail: true, calendar: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    const sealedContent = { keyFingerprint: "fp", sealed: "sealed-content" };
+                    const master: any = await createCalendarEvent(mailbox.uid, folder.uid, {
+                        title: "[...]",
+                        sealedContent,
+                        recurrenceRule: { freq: RecurrenceFrequency.DAILY, interval: 1, exceptions: [] },
+                    });
+                    const instance = [textElement(WbxmlCodePage.AirSyncBase, "InstanceId", "20260102T100000Z")];
+
+                    const echoed = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Calendar", folder.uid), "Calendar", folder.uid, [
+                            change(master.uid, [cal("Subject", "[...]"), cal("StartTime", "20260102T110000Z"), cal("EndTime", "20260102T120000Z")], instance),
+                        ]),
+                    );
+                    expect(responseOf(echoed, "Change")).toBeUndefined();
+                    const occurrence: any = (await byIcalUid(calendarEventRepo, master.icalUid)).find((row) => row.recurrenceId);
+                    expect(new Date(occurrence.startDate).toISOString()).toBe("2026-01-02T11:00:00.000Z");
+                    expect(occurrence.title).toBe("[...]");
+                    expect(occurrence.sealedFields ?? null).toBeNull();
+
+                    const renamed = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(echoed), "SyncKey")!, "Calendar", folder.uid, [change(master.uid, [cal("Subject", "Renamed")], instance)]),
+                    );
+                    expect(childText(responseOf(renamed, "Change")!, "Status")).toBe("6");
+                    const rows: any[] = await byIcalUid(calendarEventRepo, master.icalUid);
+                    expect(rows.every((row) => row.title === "[...]" && (row.sealedFields ?? null) === null)).toBe(true);
+                });
+            });
+
             it("Creates a task via a client-originated Add.", async () => {
                 const mailbox = await createMailbox(owner.uid);
                 await provisionDevice("dev1");
