@@ -988,7 +988,9 @@ export abstract class SyncCommand implements EasCommandHandler {
             return;
         }
         try {
-            this.inviteSender ??= await this._objectFactory!.newInstance(MeetingInviteSender, { name: "MeetingInviteSender", args: [this.mailboxRepo, undefined] });
+            // Unnamed, so it is this command's own: a named instance is shared through the factory, and another caller's (restapi's
+            // MeetingSchedulingJob or calendar route) would come back with its own host and repositories.
+            this.inviteSender ??= await this._objectFactory!.newInstance(MeetingInviteSender, { args: [this.mailboxRepo, undefined] });
             await this.inviteSender.sendProtectedInvitations(created, content, repo, "SyncCommand");
             /* v8 ignore start -- only building the sender can throw (sendProtectedInvitations() never does); the item is already stored */
         } catch (err: any) {
