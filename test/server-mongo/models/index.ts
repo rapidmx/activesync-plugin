@@ -16,6 +16,7 @@ export {
     MatterMongo,
     MessageMongo,
     TaskMongo,
+    ZeroAccessIndexEntryMongo,
 } from "@rapidmx/restapi/mongo";
 // This plugin's own model.
 export { DeviceSyncStateMongo } from "../../../src/models/mongo/DeviceSyncStateMongo.js";

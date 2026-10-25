@@ -39,6 +39,16 @@ export interface SyncRenderContext {
     mailboxTimezone?: string;
 }
 
+/** What `SyncCommand` hands `fromApplicationData` beyond the item itself. */
+export interface SyncWriteOptions {
+    /**
+     * Seals the MIME of a Draft body `EmailSyncAdapter` built, when zero-access covers the mail of the mailbox that owns the draft
+     * (restapi `specs/search.md` §3: no plaintext at rest, drafts included): returns the `Message` fields stored in place of the readable
+     * body, subject and preview, or `undefined` when the draft is stored readable.
+     */
+    sealDraftBody?: (mime: Buffer) => Promise<Record<string, any> | undefined>;
+}
+
 export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
     /** The MS-ASCMD `Class` value this adapter handles, e.g. `"Email"`. */
     readonly collectionClass: string;
@@ -77,8 +87,9 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
      * make someone else the organizer of an event it creates. For a `Change`, the mailbox that owns the item (the
      * synced folder's mailbox) - `CalendarSyncAdapter` uses it to tell the organizer's copy of a meeting from an
      * attendee's copy.
+     * @param options See `SyncWriteOptions` - only `EmailSyncAdapter` uses them.
      */
-    fromApplicationData?(el: WbxmlElement, existing?: T, mailbox?: Mailbox): Partial<T> | Promise<Partial<T>>;
+    fromApplicationData?(el: WbxmlElement, existing?: T, mailbox?: Mailbox, options?: SyncWriteOptions): Partial<T> | Promise<Partial<T>>;
 
     /**
      * Fields to stamp on an item just before a client-originated `Delete` removes it, or `undefined` for none.
@@ -117,9 +128,18 @@ export interface EasCollectionSyncAdapter<T extends RecoverableBaseEntity> {
      * @param appData The command's `<ApplicationData>` element - the occurrence's own new field values.
      * @param repo The collection's own repo, for the create-or-update this performs directly.
      * @param mailbox The mailbox that owns `master`.
+     * @param seal Applied to the occurrence's update patch (with the occurrence's row as it was) just before it is written: `SyncCommand`
+     * seals what zero-access protects there, as it does for every other device write.
      * @returns The occurrence's own row as saved.
      */
-    changeInstance?(master: T, instanceId: string, appData: WbxmlElement, repo: RepoUtils<T>, mailbox: Mailbox): Promise<T>;
+    changeInstance?(
+        master: T,
+        instanceId: string,
+        appData: WbxmlElement,
+        repo: RepoUtils<T>,
+        mailbox: Mailbox,
+        seal?: (patch: Record<string, any>, existing: T) => Promise<void>,
+    ): Promise<T>;
 
     /**
      * Applies a client-originated `Delete` targeting one *occurrence* of a recurring series (MS-ASAIRSYNCBASE

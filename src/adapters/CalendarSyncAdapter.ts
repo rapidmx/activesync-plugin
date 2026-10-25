@@ -405,7 +405,9 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
      * see that function's own doc comment for exactly how the occurrence's own row is found or created), then
      * applies `appData` to it the same way a whole-series `Change` applies to the series itself - `existing` is
      * the occurrence's own row either way, so `fromApplicationData`'s ghosting ("unset means unchanged") already
-     * does the right thing with no special-casing here.
+     * does the right thing with no special-casing here. `seal` (zero-access, see `EasCollectionSyncAdapter.changeInstance`) gets the
+     * patch with the occurrence's row as `existing`: a new override row starts as a copy of the series, sealed copies included, so a
+     * placeholder sent back keeps the series' value and an edited title or location is sealed afresh.
      */
     public async changeInstance(
         master: CalendarEvent,
@@ -413,10 +415,12 @@ export class CalendarSyncAdapter implements EasCollectionSyncAdapter<CalendarEve
         appData: WbxmlElement,
         repo: RepoUtils<CalendarEvent>,
         mailbox: Mailbox,
+        seal?: (patch: Record<string, any>, existing: CalendarEvent) => Promise<void>,
     ): Promise<CalendarEvent> {
         const occurrence = await ensureCalendarOccurrence(repo, master, fromCompactDateTime(instanceId));
-        const partial = this.fromApplicationData(appData, occurrence, mailbox);
-        return await repo.update({ uid: occurrence.uid, version: occurrence.version, ...partial }, asEntity(repo, occurrence), { ignoreACL: true });
+        const patch: Record<string, any> = { uid: occurrence.uid, version: occurrence.version, ...this.fromApplicationData(appData, occurrence, mailbox) };
+        await seal?.(patch, occurrence);
+        return await repo.update(patch as Partial<CalendarEvent>, asEntity(repo, occurrence), { ignoreACL: true });
     }
 
     /**

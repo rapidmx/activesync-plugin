@@ -830,7 +830,7 @@ describe("SyncCommand Tests (isolated)", () => {
             expect(childText(add, "ServerId")).toBe("new-uid");
             expect(childText(add, "Status")).toBe("1");
             expect(repo.create).toHaveBeenCalledWith({ title: "New Item", mailboxUid: "shared-mbx", folderUid: FOLDER_UID }, { ignoreACL: true });
-            expect(fromApplicationData).toHaveBeenCalledWith(expect.anything(), undefined, expect.objectContaining({ uid: "mbx-1" }));
+            expect(fromApplicationData).toHaveBeenCalledWith(expect.anything(), undefined, expect.objectContaining({ uid: "mbx-1" }), undefined);
             const saved = savedState(stateRepo);
             expect(saved.serverIds).toEqual(["new-uid"]);
             expect(saved.echoes).toEqual({ "new-uid": "2026-01-02T00:00:00.000Z" });
@@ -1066,10 +1066,51 @@ describe("SyncCommand Tests (isolated)", () => {
             const response = await command.handle(buildContext(withInstanceId("Change")).ctx);
 
             expect(findChild(collection(response!), "Responses")).toBeUndefined();
-            expect(changeInstance).toHaveBeenCalledWith(existing, "20260101T120000Z", expect.objectContaining({ tag: "ApplicationData" }), repo, expect.anything());
+            expect(changeInstance).toHaveBeenCalledWith(
+                existing,
+                "20260101T120000Z",
+                expect.objectContaining({ tag: "ApplicationData" }),
+                repo,
+                expect.anything(),
+                expect.any(Function),
+            );
             expect(repo.update).not.toHaveBeenCalled();
             // The occurrence's own row is what changed.
             expect(notificationUtils.sendMessage).toHaveBeenCalledWith(FOLDER_UID, expect.any(String), "update", occurrence);
+        });
+
+        it("Change: a draft sealed by the change is saved even when its replaced body can't be removed, which is logged.", async () => {
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID, bodyBlobKey: "bodies/old" };
+            const repo = fakeRepo({
+                findOne: vi.fn().mockResolvedValue(existing),
+                update: vi.fn().mockImplementation(async (obj: any) => ({ ...existing, ...obj, version: 2 })),
+                count: vi.fn().mockRejectedValue(new Error("db down")),
+            });
+            const sealed = { bodyBlobKey: "za/new", subject: "[...]", zeroAccess: { sealed: true } };
+            const { command, logger } = await buildCommand("Email", fakeAdapter({ collectionClass: "Email", fromApplicationData: () => sealed }), repo);
+            (command as any).blobStore = { delete: vi.fn() };
+            const request = element(WbxmlCodePage.AirSync, "Sync", [
+                element(WbxmlCodePage.AirSync, "Collections", [
+                    collectionEl(
+                        [
+                            element(WbxmlCodePage.AirSync, "Commands", [
+                                element(WbxmlCodePage.AirSync, "Change", [
+                                    textElement(WbxmlCodePage.AirSync, "ServerId", "item-1"),
+                                    element(WbxmlCodePage.AirSync, "ApplicationData", []),
+                                ]),
+                            ]),
+                        ],
+                        { collectionClass: "Email" },
+                    ),
+                ]),
+            ]);
+
+            const response = await command.handle(buildContext(request).ctx);
+
+            expect(findChild(collection(response!), "Responses")).toBeUndefined();
+            expect(repo.update).toHaveBeenCalledWith(expect.objectContaining(sealed), expect.anything(), expect.anything());
+            expect((command as any).blobStore.delete).not.toHaveBeenCalled();
+            expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/could not remove the replaced body of sealed draft item-1/));
         });
 
         it("Change: reports Status 6 when the adapter has no changeInstance(), Status 7 on a version conflict, and Status 6 on any other changeInstance() failure.", async () => {
@@ -1277,7 +1318,7 @@ describe("SyncCommand Tests (isolated)", () => {
                 ).ctx,
             );
 
-            expect(fromApplicationData).toHaveBeenCalledWith(expect.anything(), existing, ownerMailbox);
+            expect(fromApplicationData).toHaveBeenCalledWith(expect.anything(), existing, ownerMailbox, undefined);
             expect(beforeDelete).toHaveBeenCalledWith(existing, ownerMailbox);
             expect(repo.update).toHaveBeenLastCalledWith({ uid: "event-1", version: 2, cancelNoticeSentAt: new Date("2026-02-01T00:00:00.000Z") }, existing, { ignoreACL: true });
             expect(repo.delete).toHaveBeenCalledWith("event-1", { ignoreACL: true });

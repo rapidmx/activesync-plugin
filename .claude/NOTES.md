@@ -1407,7 +1407,7 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
   - It is served verbatim for MIME (Type 4) requests, so a device holding the RapidMX keys exported from web-client decrypts it itself.
   - Every other body type, and the no-BodyPreference fallback, gets `ZERO_ACCESS_PLACEHOLDER_TEXT` without touching the blob.
 - `isZeroAccessMessage()` reads `zeroAccess` structurally, because this repo builds against a published `@rapidmx/restapi` that predates the field. Simplify it once the dependency is bumped.
-- **Not done yet: the write paths.** Drafts and sent items saved over EAS (`EmailSyncAdapter` drafts, `ComposeMailCommand`) still store plaintext. They need restapi's `ZeroAccessWriter`, which is only usable after a restapi release.
+- **The write paths** (drafts and Sent Items copies saved over EAS) are sealed with restapi's `ZeroAccessWriter` since the 2026-10-24 review fixes below.
 - **Known limits for a sealed original:** MeetingResponse and SmartReply/SmartForward can't read it server-side.
 
 ## 2026-10-24 - End-to-end encrypted bodies (OpenPGP interoperability)
@@ -1429,3 +1429,21 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
   - A placeholder the device sends back unchanged is ignored; new plaintext is sealed when that type is protected for the folder's mailbox.
   - Devices see the placeholders, e.g. "Protected task".
 - The test servers' model indexes must export `EncryptionPolicyMongo`/`SQL`; SQL otherwise reports "No metadata".
+
+### 2026-10-24: Review fixes (cross-repo adversarial review)
+- **Occurrence edits sealed (InstanceId Change).** `CalendarSyncAdapter.changeInstance()` takes a `seal` callback, and `SyncCommand` passes `sealDeviceWrite()`. Before, a protocol-16 device renaming one occurrence of a protected series stored the new title and location readable. The backfill never repaired it, because the override row inherits the series' `sealedFields`.
+- **Empty echoes keep sealed values.** `sealDeviceWrite()` drops a protected field the device sends as `""` when the existing row has a sealed copy and the placeholder is empty (location, contact name parts and notes, task notes). The device was shown nothing there. The restapi sealer only matches the placeholder itself (`null`), so it deleted the sealed copy. This is fixed here and not in restapi's `sameValue()`, because a REST `""` is a real clear.
+- **Sent Items copies and drafts sealed** (restapi `specs/search.md` "Every Write"):
+  - `ComposeMailCommand` mints the copy's uid and calls `sealRaw()` unless `relayed.encrypted`. A sealed copy gets placeholder `subject`/`bodyPreview`, `zeroAccess`, no `sanitizedHtmlBlobKey`, and nothing readable in the blob store.
+  - The relay scan's sanitized HTML blob is deleted whenever no readable copy names it, i.e. a sealed copy or no SaveInSentItems. Before, it was orphaned on every send without SaveInSentItems.
+  - Draft Add/Change: `fromApplicationData()` takes `SyncWriteOptions.sealDraftBody`. `SyncCommand` supplies it for `Email` collections and seals with `sealDraft()` to the folder's mailbox. The Add mints the uid up front. No plaintext blob is written.
+  - After a sealing Change, the replaced body and sanitized HTML are removed when unreferenced (`deleteBlobsIfUnreferenced`), the same way the backfill discards plaintext. Best effort.
+  - A sealed draft saved readable again (zero-access turned off) gets `zeroAccess: null`, so readers don't take its plaintext for CMS.
+  - A Change carrying a new `Subject` without a `Body` on a sealed message is refused (Status 6): the server can't rebuild the sealed body. The placeholder subject `[...]` sent back is dropped.
+  - `encryptionPolicyClass`/`zeroAccessIndexEntryClass` are set on the Mongo/SQL `SyncCommand`, `SendMail`, `SmartReply` and `SmartForward` subclasses. The test servers' model indexes export `ZeroAccessIndexEntryMongo`/`SQL`.
+- **New devices get their types recorded.** `recordSyncClient()` re-reads the collections of a device recorded with no types, even inside the 6 h refresh window. Its first requests (Provision, FolderSync) come before any `EasCollectionState`, so it used to stay typeless for 6 h, which skewed restapi's zero-access defaults. A device that really syncs nothing costs one extra find per request.
+- **Deliberately left:**
+  - A device editing a sealed draft only ever saw the placeholders. Its edited body therefore contains the placeholder text, and its subject is `[...]`. Both are sealed as sent.
+  - A sealed blob written before a failed create or update (version conflict) is orphaned ciphertext. The draft's replaced index entry is not restored.
+  - `noteWrite()` is still not called for occurrence edits (unchanged behavior).
+

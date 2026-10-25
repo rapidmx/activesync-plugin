@@ -17,11 +17,14 @@ import {
     type Mailbox,
     type Message,
     MessageImportance,
+    newZeroAccessWriter,
     prependHeaders,
     RecipientType,
     RecoverableRepoUtils,
     refreshFolderCounts,
     scanAndRelay,
+    type ZeroAccessSealedFields,
+    type ZeroAccessWriter,
 } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
@@ -111,10 +114,14 @@ export { stripHeader };
  * - Attachments present in the composed MIME are relayed correctly but are not additionally persisted as
  * `Attachment` records on the saved Sent Items copy (`Message.hasAttachments` is still set).
  *
+ * **Zero-access** (restapi `specs/search.md` §3): when zero-access covers the mailbox's mail, the Sent Items copy is sealed like delivered
+ * mail (`ZeroAccessWriter.sealRaw()`) - its body, subject and preview are never stored readable - unless the device already encrypted it
+ * end to end. The sanitized HTML the relay scan wrote is removed whenever no readable copy is saved that names it.
+ *
  * The Sent Items copy and the original's flag change are published to an open web client (`EasLiveUpdates`), and Sent
  * Items' counts refreshed, as restapi's own message writes do.
  *
- * `folderClass`/`messageClass`/`mailboxClass` are supplied by the Mongo/SQL concrete subclasses, and
+ * `folderClass`/`messageClass`/`mailboxClass` (and `encryptionPolicyClass`/`zeroAccessIndexEntryClass`) are supplied by the Mongo/SQL concrete subclasses, and
  * `markOriginal()` by the `SmartForwardCommand`/`SmartReplyCommand` subclasses.
  *
  * @author Jean-Philippe Steinmetz
@@ -126,6 +133,11 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
     protected abstract folderClass: any;
     protected abstract messageClass: any;
     protected abstract mailboxClass: any;
+    /** The backend's `EncryptionPolicy` and `ZeroAccessIndexEntry`, for sealing the Sent Items copy of a zero-access mailbox. Optional:
+     * without them the copy is stored readable. */
+    protected encryptionPolicyClass?: any;
+    protected zeroAccessIndexEntryClass?: any;
+    private zeroAccessWriter?: ZeroAccessWriter;
 
     // Automatically injected by ObjectFactory on instantiation
     private _objectFactory?: ObjectFactory;
@@ -171,6 +183,7 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         if (!this.mailboxRepo && this.mailboxClass) {
             this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
         }
+        this.zeroAccessWriter ??= await newZeroAccessWriter(this._objectFactory, this.encryptionPolicyClass, this.zeroAccessIndexEntryClass);
     }
 
     /** Called once the outgoing message has been sent, only when the request carried a `<Source>` the caller may
@@ -284,13 +297,20 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         const stripped: Buffer = stripHeader(composed, "bcc");
         const relayed = await scanAndRelay(stripped, envelopeFrom, envelopeTo, this.scanPipeline, this.mailTransport, this.blobStore);
 
+        let sealed: ZeroAccessSealedFields | undefined;
         if (saveInSentItemsRequested) {
-            const bodyBlobKey = `bodies/${crypto.randomUUID()}`;
+            const uid: string = crypto.randomUUID();
             // The Sent Items copy keeps its Bcc header, but must carry the `Message-ID` the message was actually relayed
             // with: `scanAndRelay()` injects one when the device's MIME had none, and recall/threading match on it.
             const stored: Buffer =
                 relayed.raw !== stripped ? prependHeaders(composed, [{ name: "Message-ID", value: `<${relayed.messageId}>` }]) : composed;
-            await this.blobStore.put(bodyBlobKey, stored, { contentType: "message/rfc822" });
+            // Sealed for a zero-access mailbox, as restapi seals its own Sent Items copies - not one the device encrypted end to end,
+            // which is ciphertext already.
+            sealed = relayed.encrypted ? undefined : await this.zeroAccessWriter?.sealRaw(mailbox, stored, uid, new Date());
+            const bodyBlobKey: string = sealed ? sealed.bodyBlobKey : `bodies/${crypto.randomUUID()}`;
+            if (!sealed) {
+                await this.blobStore.put(bodyBlobKey, stored, { contentType: "message/rfc822" });
+            }
 
             const sentFolder: any = await findOrCreateWellKnownFolder(
                 this.folderRepo,
@@ -302,21 +322,23 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
 
             const sentCopy = await this.messageRepo.create(
                 new this.messageClass({
+                    uid,
                     folderUid: sentFolder.uid,
                     mailboxUid: ctx.mailboxUid,
                     // The relay's own values (angle brackets stripped, as every recipient's ingest stores them), bounded
                     // the way restapi stores indexed identifiers - not mailparser's bracketed `Message-ID`.
                     messageId: boundIndexedValue(relayed.messageId),
                     conversationId: boundIndexedValue(relayed.conversationId),
-                    subject: parsed.subject ?? "",
+                    subject: sealed ? sealed.subject : (parsed.subject ?? ""),
                     from: { address: envelopeFrom, type: RecipientType.TO },
                     recipients: buildRecipients(parsed),
                     sentDate: new Date(),
                     receivedDate: new Date(),
                     bodyBlobKey,
-                    sanitizedHtmlBlobKey: relayed.sanitizedHtmlBlobKey,
+                    sanitizedHtmlBlobKey: sealed ? undefined : relayed.sanitizedHtmlBlobKey,
                     encrypted: relayed.encrypted,
-                    bodyPreview: (parsed.text ?? "").slice(0, 200),
+                    bodyPreview: sealed ? sealed.bodyPreview : (parsed.text ?? "").slice(0, 200),
+                    ...(sealed ? { zeroAccess: sealed.zeroAccess } : {}),
                     flags: { read: true, flagged: false, answered: false, forwarded: false },
                     importance: MessageImportance.NORMAL,
                     inReplyTo: original?.messageId,
@@ -332,6 +354,14 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
                 { messageRepo: this.messageRepo, folderRepo: this.folderRepo, folderClass: this.folderClass, notificationUtils: this.notificationUtils, logger: this.logger },
                 [sentFolder.uid],
             );
+        }
+        if (relayed.sanitizedHtmlBlobKey && (!saveInSentItemsRequested || sealed)) {
+            // Nothing names the relay scan's sanitized HTML: it would only be readable content left behind.
+            try {
+                await this.blobStore.delete(relayed.sanitizedHtmlBlobKey);
+            } catch (err: any) {
+                this.logger?.warn(`${this.command}: failed to remove the sanitized HTML of a sent message: ${err?.message}`);
+            }
         }
 
         if (original) {

@@ -215,6 +215,10 @@ describe("@Init hooks", () => {
                 if ("encryptionPolicyClass" in obj) {
                     obj.recordSealer = {};
                 }
+                // Likewise its zero-access writer, which seals drafts and Sent Items copies.
+                if ("zeroAccessIndexEntryClass" in obj) {
+                    obj.zeroAccessWriter = {};
+                }
 
                 await obj[c.hook]();
 

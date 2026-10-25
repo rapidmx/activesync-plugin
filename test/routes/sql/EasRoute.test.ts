@@ -187,6 +187,15 @@ describe("Route:EasRouteSQL Tests", () => {
         );
     };
 
+    /** A row by uid, its rows by `icalUid`, and the mailbox's Sent Items copy - the backend's own query shapes, so the zero-access
+     * tests read the same on both. */
+    const byUid = async (repo: any, uid: string): Promise<any> => await repo.findOne({ where: { uid } });
+    const byIcalUid = async (repo: any, icalUid: string): Promise<any[]> => await repo.find({ where: { icalUid } });
+    const sentCopyOf = async (mailboxUid: string): Promise<any> => {
+        const sent = await folderRepo.findOne({ where: { mailboxUid, type: FolderType.SENT_ITEMS } });
+        return await messageRepo.findOne({ where: { folderUid: sent!.uid } });
+    };
+
     const blobStore = function (): InMemoryBlobStore {
         return objectFactory.getInstance<InMemoryBlobStore>("BlobStore")!;
     };
@@ -1932,6 +1941,213 @@ describe("Route:EasRouteSQL Tests", () => {
                 expect(JSON.stringify(created)).not.toContain("CANARY");
             });
 
+            describe("Zero-access device writes (review fixes)", () => {
+                const protect = async (types: Record<string, boolean>): Promise<any> => {
+                    const mailbox: any = await createMailbox(owner.uid);
+                    mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+                    mailbox.zeroAccessTypes = types;
+                    return await mailboxRepo.save(mailbox);
+                };
+                const textBody = (data: string) =>
+                    element(WbxmlCodePage.AirSyncBase, "Body", [textElement(WbxmlCodePage.AirSyncBase, "Type", "1"), textElement(WbxmlCodePage.AirSyncBase, "Data", data)]);
+                /** Whether any blob in the store holds `text` readable. */
+                const stored = (text: string): boolean => [...(blobStore() as any).store.values()].some((blob: Buffer) => blob.toString("utf-8").includes(text));
+                const responseOf = (response: WbxmlElement, tag: string) => findChild(findChild(collectionOf(response), "Responses") ?? element(WbxmlCodePage.AirSync, "Responses", []), tag);
+                const add = (clientId: string, fields: WbxmlElement[]) =>
+                    element(WbxmlCodePage.AirSync, "Add", [textElement(WbxmlCodePage.AirSync, "ClientId", clientId), element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+                const change = (serverId: string, fields: WbxmlElement[], extra: WbxmlElement[] = []) =>
+                    element(WbxmlCodePage.AirSync, "Change", [textElement(WbxmlCodePage.AirSync, "ServerId", serverId), ...extra, element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+
+                it("Seals a draft a device saves when zero-access covers the mailbox's mail, reseals it on a body change, and refuses a subject-only change.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+
+                    const added = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Email", folder.uid), "Email", folder.uid, [
+                            add("client-1", [textElement(WbxmlCodePage.Email, "Subject", `${canary} subject`), textBody(`${canary} body`)]),
+                        ]),
+                    );
+                    expect(childText(responseOf(added, "Add")!, "Status")).toBe("1");
+                    const uid = childText(responseOf(added, "Add")!, "ServerId")!;
+                    const draft: any = await byUid(messageRepo, uid);
+                    expect(draft.zeroAccess).toBeTruthy();
+                    expect(draft.subject).toBe("[...]");
+                    expect(draft.bodyPreview).toBe("");
+                    expect(JSON.stringify(draft)).not.toContain(canary);
+                    expect(stored(canary)).toBe(false);
+
+                    // A new subject without a body can't be sealed into the draft: refused, nothing stored.
+                    const subjectOnly = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(added), "SyncKey")!, "Email", folder.uid, [
+                            change(uid, [textElement(WbxmlCodePage.Email, "Subject", `${canary} renamed`)]),
+                        ]),
+                    );
+                    expect(childText(responseOf(subjectOnly, "Change")!, "Status")).toBe("6");
+                    expect(JSON.stringify(await byUid(messageRepo, uid))).not.toContain(canary);
+
+                    // The placeholder subject sent back with a read-state change is ignored; the change applies.
+                    const echoed = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(subjectOnly), "SyncKey")!, "Email", folder.uid, [
+                            change(uid, [textElement(WbxmlCodePage.Email, "Subject", "[...]"), textElement(WbxmlCodePage.Email, "Read", "0")]),
+                        ]),
+                    );
+                    expect(responseOf(echoed, "Change")).toBeUndefined();
+                    const unread: any = await byUid(messageRepo, uid);
+                    expect(unread.flags.read).toBe(false);
+                    expect(unread.subject).toBe("[...]");
+                    expect(unread.bodyBlobKey).toBe(draft.bodyBlobKey);
+
+                    const edited = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(echoed), "SyncKey")!, "Email", folder.uid, [
+                            change(uid, [textElement(WbxmlCodePage.Email, "Subject", `${canary} new subject`), textBody(`${canary} new body`)]),
+                        ]),
+                    );
+                    expect(responseOf(edited, "Change")).toBeUndefined();
+                    const resealed: any = await byUid(messageRepo, uid);
+                    expect(resealed.zeroAccess).toBeTruthy();
+                    expect(resealed.bodyBlobKey).not.toBe(draft.bodyBlobKey);
+                    expect(JSON.stringify(resealed)).not.toContain(canary);
+                    expect(stored(canary)).toBe(false);
+                    await expect(blobStore().get(draft.bodyBlobKey)).rejects.toThrow();
+                    expect(await blobStore().get(resealed.bodyBlobKey)).toBeTruthy();
+                });
+
+                it("Seals a readable draft a device edits once zero-access covers the mail, removing its readable body; a sealed draft saved readable again loses its zeroAccess marker.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const readable = await createMessage(mailbox.uid, folder.uid, { subject: "Before zero-access" });
+                    await blobStore().put(readable.bodyBlobKey, Buffer.from(`Subject: Before zero-access\r\n\r\n${canary} old body`), { contentType: "message/rfc822" });
+                    const syncKey = await initialSyncKey("Email", folder.uid);
+
+                    const response = await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(readable.uid, [textBody(`${canary} new body`)])]));
+                    expect(responseOf(response, "Change")).toBeUndefined();
+                    const sealed: any = await byUid(messageRepo, readable.uid);
+                    expect(sealed.zeroAccess).toBeTruthy();
+                    expect(stored(canary)).toBe(false);
+
+                    // Zero-access turned off: the next body change is stored readable, and the row no longer claims to be sealed.
+                    const current: any = await byUid(mailboxRepo, mailbox.uid);
+                    current.zeroAccessKeys = [];
+                    await mailboxRepo.save(current);
+                    const again = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(response), "SyncKey")!, "Email", folder.uid, [change(readable.uid, [textBody("Readable again")])]),
+                    );
+                    expect(responseOf(again, "Change")).toBeUndefined();
+                    const plain: any = await byUid(messageRepo, readable.uid);
+                    expect(plain.zeroAccess ?? null).toBeNull();
+                    expect((await blobStore().get(plain.bodyBlobKey)).toString("utf-8")).toContain("Readable again");
+                });
+
+                it("Seals the title and location of one occurrence a device edits in a protected calendar (InstanceId), rather than storing them readable.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const mailbox = await protect({ calendar: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    const cal = (tag: string, value: string) => textElement(WbxmlCodePage.Calendar, tag, value);
+
+                    const added = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Calendar", folder.uid), "Calendar", folder.uid, [
+                            add("client-1", [
+                                cal("Subject", "Weekly sync"),
+                                cal("Location", "Room 1"),
+                                cal("StartTime", "20260105T100000Z"),
+                                cal("EndTime", "20260105T103000Z"),
+                                element(WbxmlCodePage.Calendar, "Recurrence", [cal("Type", "1"), cal("Interval", "1"), cal("DayOfWeek", "2")]),
+                            ]),
+                        ]),
+                    );
+                    const masterUid = childText(responseOf(added, "Add")!, "ServerId")!;
+                    const master: any = await byUid(calendarEventRepo, masterUid);
+                    expect(master.title).toBe("Protected event");
+
+                    const edited = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(added), "SyncKey")!, "Calendar", folder.uid, [
+                            change(
+                                masterUid,
+                                [cal("Subject", `${canary} title`), cal("Location", `${canary} room`), cal("StartTime", "20260112T100000Z"), cal("EndTime", "20260112T103000Z")],
+                                [textElement(WbxmlCodePage.AirSyncBase, "InstanceId", "20260112T100000Z")],
+                            ),
+                        ]),
+                    );
+                    expect(responseOf(edited, "Change")).toBeUndefined();
+                    const rows: any[] = await byIcalUid(calendarEventRepo, master.icalUid);
+                    const occurrence: any = rows.find((row) => row.recurrenceId);
+                    expect(occurrence).toBeDefined();
+                    expect(occurrence.title).toBe("Protected event");
+                    expect(occurrence.location ?? null).toBeNull();
+                    expect(occurrence.sealedFields.title).not.toBe(master.sealedFields.title);
+                    expect(occurrence.sealedFields.location).not.toBe(master.sealedFields.location);
+                    expect(JSON.stringify(rows)).not.toContain(canary);
+                });
+
+                it("Keeps a sealed location, and a sealed task note, when a device sends back an empty element for a field it was shown none of.", async () => {
+                    const mailbox = await protect({ calendar: true, tasks: true });
+                    await provisionDevice("dev1");
+                    const calendar = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    const tasks = await createFolderWithAcl(mailbox.uid, { name: "Tasks", type: FolderType.TASKS });
+                    const cal = (tag: string, value: string) => textElement(WbxmlCodePage.Calendar, tag, value);
+
+                    const addedEvent = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Calendar", calendar.uid), "Calendar", calendar.uid, [
+                            add("client-1", [cal("Subject", "Checkup"), cal("Location", "Clinic"), cal("StartTime", "20260301T090000Z"), cal("EndTime", "20260301T093000Z")]),
+                        ]),
+                    );
+                    const eventUid = childText(responseOf(addedEvent, "Add")!, "ServerId")!;
+                    const event: any = await byUid(calendarEventRepo, eventUid);
+                    const movedEvent = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(addedEvent), "SyncKey")!, "Calendar", calendar.uid, [
+                            change(eventUid, [cal("Subject", "Protected event"), cal("Location", ""), cal("StartTime", "20260301T100000Z"), cal("EndTime", "20260301T103000Z")]),
+                        ]),
+                    );
+                    expect(responseOf(movedEvent, "Change")).toBeUndefined();
+                    const moved: any = await byUid(calendarEventRepo, eventUid);
+                    expect(new Date(moved.startDate).toISOString()).toBe("2026-03-01T10:00:00.000Z");
+                    expect(moved.sealedFields.location).toBe(event.sealedFields.location);
+                    expect(moved.sealedFields.title).toBe(event.sealedFields.title);
+
+                    const addedTask = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Tasks", tasks.uid), "Tasks", tasks.uid, [
+                            add("client-2", [textElement(WbxmlCodePage.Tasks, "Subject", "Renew"), textBody("Passport number")]),
+                        ]),
+                    );
+                    const taskUid = childText(responseOf(addedTask, "Add")!, "ServerId")!;
+                    const task: any = await byUid(taskRepo, taskUid);
+                    expect(task.sealedFields.body).toEqual(expect.any(String));
+                    await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(addedTask), "SyncKey")!, "Tasks", tasks.uid, [
+                            change(taskUid, [textElement(WbxmlCodePage.Tasks, "Subject", "Protected task"), textBody("")]),
+                        ]),
+                    );
+                    expect((await byUid(taskRepo, taskUid)).sealedFields.body).toBe(task.sealedFields.body);
+                });
+            });
+
             it("Creates a task via a client-originated Add.", async () => {
                 const mailbox = await createMailbox(owner.uid);
                 await provisionDevice("dev1");
@@ -2299,6 +2515,33 @@ describe("Route:EasRouteSQL Tests", () => {
                 { address: "bcc@example.com", type: RecipientType.BCC },
             ]);
             expect(saved?.flags.read).toBe(true);
+        });
+
+        it("SendMail with SaveInSentItems seals the Sent Items copy when zero-access covers the mailbox's mail, storing nothing readable.", async () => {
+            const canary = `CANARY-${uuid.v4()}`;
+            const mailbox: any = await createMailbox(owner.uid, ["owner@example.com"]);
+            mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+            mailbox.zeroAccessTypes = { mail: true };
+            await mailboxRepo.save(mailbox);
+            await provisionDevice("dev1");
+
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                .set("Authorization", "jwt " + ownerToken)
+                .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                .send(new WbxmlEncoder().encode(composeRequest("SendMail", rawMime({ subject: `${canary} subject`, body: `${canary} body` }), { saveInSentItems: true })));
+            expect(result.status).toBeLessThan(300);
+            expect(transport().sent).toHaveLength(1);
+
+            const saved: any = await sentCopyOf(mailbox.uid);
+            expect(saved.zeroAccess).toBeTruthy();
+            expect(saved.subject).toBe("[...]");
+            expect(saved.bodyPreview).toBe("");
+            expect(saved.sanitizedHtmlBlobKey ?? null).toBeNull();
+            expect(JSON.stringify(saved)).not.toContain(canary);
+            expect(await blobStore().get(saved.bodyBlobKey)).toBeTruthy();
+            expect([...(blobStore() as any).store.values()].some((blob: Buffer) => blob.toString("utf-8").includes(canary))).toBe(false);
         });
 
         it("SendMail without SaveInSentItems relays but does not save a copy.", async () => {

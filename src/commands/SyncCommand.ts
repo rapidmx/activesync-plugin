@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import * as crypto from "crypto";
 import { ApiError, ObjectDecorators } from "@rapidrest/core";
 import {
     ACLAction,
@@ -25,7 +26,13 @@ import {
     refreshFolderCounts,
     type Mailbox,
     newZeroAccessRecordSealer,
+    newZeroAccessWriter,
     hasSealedFields,
+    PROTECTED_FIELDS,
+    type BlobStore,
+    deleteBlobsIfUnreferenced,
+    messageBlobReferenceSources,
+    type ZeroAccessWriter,
     MeetingInviteSender,
     protectedInvitationsPending,
     type InvitationContent,
@@ -50,7 +57,7 @@ import { EasCollectionLease, type LeaseRelease } from "../EasCollectionLease.js"
 import { EasAuditLog } from "../EasAuditLog.js";
 import { EasLiveUpdates, type LiveUpdateAction } from "../EasLiveUpdates.js";
 import type { EasCommandContext, EasCommandHandler } from "../EasCommandHandler.js";
-import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "../adapters/EasCollectionSyncAdapter.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext, SyncWriteOptions } from "../adapters/EasCollectionSyncAdapter.js";
 import type { EasCollectionState } from "../models/EasCollectionState.js";
 
 /** The zero-access data type of each EAS collection class sealed field by field (mail is sealed whole, on delivery). */
@@ -204,7 +211,11 @@ export abstract class SyncCommand implements EasCommandHandler {
     /** The backend's `EncryptionPolicy`, for sealing protected calendar events, contacts and tasks a device writes (restapi
      * `ZeroAccessRecordSealer`). Optional: without it nothing is sealed. */
     protected encryptionPolicyClass?: any;
+    /** The backend's `ZeroAccessIndexEntry`: with `encryptionPolicyClass`, a draft a device saves is sealed when zero-access covers the
+     * mailbox's mail (restapi `ZeroAccessWriter`). Optional: without it drafts are stored readable. */
+    protected zeroAccessIndexEntryClass?: any;
     private recordSealer?: ZeroAccessRecordSealer;
+    private zeroAccessWriter?: ZeroAccessWriter;
     /** Sends the invitations of a meeting a device creates in a protected calendar (`inviteProtectedAdd()`). Built on first use. */
     private inviteSender?: MeetingInviteSender;
 
@@ -237,6 +248,9 @@ export abstract class SyncCommand implements EasCommandHandler {
 
     @Inject(NotificationUtils)
     private notificationUtils?: NotificationUtils;
+
+    @Inject("BlobStore")
+    private blobStore?: BlobStore;
 
     @Logger
     private logger: any;
@@ -289,6 +303,7 @@ export abstract class SyncCommand implements EasCommandHandler {
         if (!this.recordSealer && this.encryptionPolicyClass) {
             this.recordSealer = await newZeroAccessRecordSealer(this._objectFactory, this.encryptionPolicyClass);
         }
+        this.zeroAccessWriter ??= await newZeroAccessWriter(this._objectFactory, this.encryptionPolicyClass, this.zeroAccessIndexEntryClass);
     }
 
     private get chunkStore(): ChunkStore {
@@ -818,8 +833,11 @@ export abstract class SyncCommand implements EasCommandHandler {
         try {
             const mailbox = await round.getMailbox();
             const defaults = adapter.newEntityDefaults ? adapter.newEntityDefaults(mailbox) : {};
-            const partial = await adapter.fromApplicationData(appData, undefined, mailbox);
-            const body: any = { ...defaults, ...partial, mailboxUid: folder.mailboxUid, folderUid: folder.uid };
+            // A draft's uid is chosen up front when it may be sealed: the sealed body and its index entry are keyed by it.
+            const uid: string = crypto.randomUUID();
+            const options: SyncWriteOptions | undefined = this.draftWriteOptions(round, uid);
+            const partial = await adapter.fromApplicationData(appData, undefined, mailbox, options);
+            const body: any = { ...defaults, ...partial, ...(options ? { uid } : {}), mailboxUid: folder.mailboxUid, folderUid: folder.uid };
             const content: InvitationContent | undefined = round.collectionClass === "Calendar" ? invitationContentOf(body) : undefined;
             await this.sealDeviceWrite(round, body, undefined);
             const created = await repo.create(body, { ignoreACL: true });
@@ -870,7 +888,9 @@ export abstract class SyncCommand implements EasCommandHandler {
                 return this.statusResponseElement("Change", serverId, "6");
             }
             try {
-                const occurrence = await adapter.changeInstance(existing, instanceId, appData, repo, await round.getFolderMailbox());
+                const occurrence = await adapter.changeInstance(existing, instanceId, appData, repo, await round.getFolderMailbox(), (patch, row) =>
+                    this.sealDeviceWrite(round, patch, row),
+                );
                 this.publishWrite(round, "update", occurrence);
                 return undefined;
             } catch (err: any) {
@@ -881,10 +901,13 @@ export abstract class SyncCommand implements EasCommandHandler {
             }
         }
         try {
-            const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox());
+            const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox(), this.draftWriteOptions(round, existing.uid));
             const patch: any = { uid: existing.uid, version: existing.version, ...partial };
             await this.sealDeviceWrite(round, patch, existing);
             const updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
+            if (patch.zeroAccess) {
+                await this.discardReplacedBody(repo, existing);
+            }
             this.noteWrite(round, updated);
             this.publishWrite(round, "update", updated);
             return undefined;
@@ -899,14 +922,50 @@ export abstract class SyncCommand implements EasCommandHandler {
     /**
      * Seals what a device writes to a calendar, contacts or tasks collection when zero-access covers that type for the folder's mailbox
      * (restapi `specs/search.md` §3 *What It Covers*): the device sends plaintext, which is never stored, and a placeholder it was shown
-     * and sends back unchanged leaves the protected value alone.
+     * and sends back unchanged leaves the protected value alone. That includes an empty string for a sealed field whose placeholder is
+     * empty (a location, a contact's or task's notes): the device was shown nothing there, so `""` is what it was shown, not a clear -
+     * the restapi sealer only matches the placeholder itself (`null`), and would otherwise drop the sealed value.
      */
     private async sealDeviceWrite(round: CollectionRound, body: any, existing: any): Promise<void> {
         const type = COLLECTION_DATA_TYPES[round.collectionClass];
         if (!type || !this.recordSealer) {
             return;
         }
+        for (const field of existing ? PROTECTED_FIELDS[type]! : []) {
+            const placeholder: unknown = field.placeholder(existing);
+            if (body[field.name] === "" && existing.sealedFields?.[field.name] !== undefined && (placeholder == null || placeholder === "")) {
+                delete body[field.name];
+            }
+        }
         await this.recordSealer.sealWrite(type, await round.getFolderMailbox(), body, existing);
+    }
+
+    /**
+     * How a device's draft in an `Email` collection is sealed when zero-access covers the mail of the folder's mailbox (restapi
+     * `specs/search.md` §3: drafts are sealed on save) - see `SyncWriteOptions.sealDraftBody`. `undefined` for any other collection, or
+     * when this backend can't seal mail.
+     */
+    private draftWriteOptions(round: CollectionRound, uid: string): SyncWriteOptions | undefined {
+        const writer: ZeroAccessWriter | undefined = this.zeroAccessWriter;
+        if (round.collectionClass !== "Email" || !writer) {
+            return undefined;
+        }
+        return {
+            sealDraftBody: async (mime: Buffer) => {
+                const sealed = await writer.sealDraft(await round.getFolderMailbox(), mime, uid, new Date());
+                return sealed && { subject: sealed.subject, bodyPreview: sealed.bodyPreview, bodyBlobKey: sealed.bodyBlobKey, zeroAccess: sealed.zeroAccess, sanitizedHtmlBlobKey: null };
+            },
+        };
+    }
+
+    /** Removes the body (and sanitized HTML) a draft sealed by a device's Change no longer points at - readable, when the draft was saved
+     * before zero-access covered it - unless another message still names it. Best effort: the draft is already saved. */
+    private async discardReplacedBody(repo: RepoUtils<any>, previous: any): Promise<void> {
+        try {
+            await deleteBlobsIfUnreferenced(this.blobStore!, messageBlobReferenceSources({ messageRepo: repo }), [previous.bodyBlobKey, previous.sanitizedHtmlBlobKey]);
+        } catch (err: any) {
+            this.logger?.warn(`SyncCommand: could not remove the replaced body of sealed draft ${previous.uid}: ${err?.message ?? err}`);
+        }
     }
 
     /**

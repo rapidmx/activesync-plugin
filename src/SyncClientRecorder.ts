@@ -83,7 +83,9 @@ export async function recordSyncClient(repos: SyncClientRepos, mailboxUid: strin
     }
     const devices: RecordedDevice[] | undefined = mailbox.syncClients?.activesync?.devices;
     const known: RecordedDevice | undefined = devices?.find((d) => d.id === deviceId);
-    if (known && now - known.lastSeenAt < SYNC_CLIENT_REFRESH_MS && known.model === model) {
+    // A device recorded with no types yet (its first requests - Provision, FolderSync - come before it syncs any collection) has its
+    // collections read again on every request until it has some: the types its first Sync adds aren't left unrecorded for hours.
+    if (known && now - known.lastSeenAt < SYNC_CLIENT_REFRESH_MS && known.model === model && known.types.length > 0) {
         return;
     }
     const collections: { collectionClass?: string }[] = repos.collectionStateRepo

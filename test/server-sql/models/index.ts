@@ -14,6 +14,7 @@ export {
     MatterSQL,
     MessageSQL,
     TaskSQL,
+    ZeroAccessIndexEntrySQL,
 } from "@rapidmx/restapi/sql";
 // This plugin's own model.
 export { DeviceSyncStateSQL } from "../../../src/models/sql/DeviceSyncStateSQL.js";

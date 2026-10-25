@@ -61,6 +61,20 @@ describe("SyncClientRecorder", () => {
             expect(bare.mailboxRepo.update.mock.calls[0][0].syncClients.activesync.devices[0].types).toEqual([]);
         });
 
+        it("reads the collections again for a device recorded recently with no types, recording the types its first Sync added", async () => {
+            const firstSeen = repos(
+                { uid: "mb", version: 1, syncClients: { activesync: { devices: [device("dev1", { model: "Android", types: [], lastSeenAt: NOW - 1 })] } } },
+                [{ collectionClass: "Calendar" }, { collectionClass: "Contacts" }],
+            );
+            await recordSyncClient(firstSeen, "mb", "dev1", "Android", NOW);
+            expect(firstSeen.collectionStateRepo.find).toHaveBeenCalled();
+            expect(firstSeen.mailboxRepo.update.mock.calls[0][0].syncClients.activesync.devices[0].types).toEqual(["calendar", "contacts"]);
+
+            const stillNone = repos({ uid: "mb", syncClients: { activesync: { devices: [device("dev1", { model: "Android", types: [], lastSeenAt: NOW - 1 })] } } }, []);
+            await recordSyncClient(stillNone, "mb", "dev1", "Android", NOW);
+            expect(stillNone.mailboxRepo.update).not.toHaveBeenCalled();
+        });
+
         it("writes nothing when the stale record turns out unchanged, or the mailbox is gone", async () => {
             const stale = repos({ uid: "mb", syncClients: { activesync: { devices: [device("dev1", { model: "Android", types: ["contacts", "mail"], lastSeenAt: NOW - SYNC_CLIENT_REFRESH_MS })] } } });
             await recordSyncClient(stale, "mb", "dev1", "Android", NOW - SYNC_CLIENT_REFRESH_MS + 10);

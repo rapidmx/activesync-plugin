@@ -10,7 +10,7 @@ import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, opaqueElement, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
 import { toCompactDateTime } from "../CompactDateTime.js";
 import { isProtocol16OrLater } from "../EasCommandHandler.js";
-import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext } from "./EasCollectionSyncAdapter.js";
+import type { EasCollectionSyncAdapter, SyncBodyPreference, SyncRenderContext, SyncWriteOptions } from "./EasCollectionSyncAdapter.js";
 import { isGenuineDraft } from "../MessageMoveRules.js";
 import { truncateUtf8 } from "../MimeHeaderUtils.js";
 import { allDayDateToLocalMidnight, encodeTimeZone } from "../TimeZoneInfo.js";
@@ -30,6 +30,7 @@ import {
     FolderType,
     htmlToPlainText,
     MessageImportance,
+    PROTECTED_SUBJECT,
     RecipientType,
     resolveTimeZone,
 } from "@rapidmx/restapi";
@@ -452,8 +453,14 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
      * RFC 5322 message here (via `buildPlainTextMime`) rather than stored as bare text, so that contract holds
      * for every consumer, not just this write path - a Draft created/edited via `Sync` must `Fetch` correctly
      * the same way any other message does.
+     *
+     * **Zero-access** (`options.sealDraftBody`, restapi `specs/search.md` §3): a Draft body is sealed rather than stored readable when
+     * zero-access covers the mailbox's mail, its subject and preview stored as placeholders. A sealed message's body can't be rebuilt
+     * here, so a `Change` of one that carries a new `Subject` without a `Body` is refused (Status 6); the placeholder subject the device
+     * was shown, sent back, is ignored. A sealed draft saved readable again (zero-access since turned off) loses its `zeroAccess` marker,
+     * so readers never take its plaintext blob for S/MIME.
      */
-    public async fromApplicationData(el: WbxmlElement, existing?: Message, mailbox?: Mailbox): Promise<Partial<Message>> {
+    public async fromApplicationData(el: WbxmlElement, existing?: Message, mailbox?: Mailbox, options?: SyncWriteOptions): Promise<Partial<Message>> {
         const partial: Partial<Message> = {};
 
         const subject = childText(el, "Subject");
@@ -500,6 +507,12 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         }
 
         const bodyEl = findChild(el, "Body");
+        if (existing && isZeroAccessMessage(existing) && !bodyEl && partial.subject !== undefined) {
+            if (partial.subject !== PROTECTED_SUBJECT) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A sealed message's subject can only be changed together with its body.");
+            }
+            delete partial.subject;
+        }
         // A new Draft always gets a body blob (empty when the device sent no Body) - every consumer of
         // `bodyBlobKey` (`ItemOperations` Fetch, exports) expects it to resolve to real MIME.
         if (bodyEl || !existing) {
@@ -514,19 +527,30 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
             // the plain-text MIME built below would otherwise show as literal tags.
             const data = (bodyEl && childText(bodyEl, "Data")) ?? "";
             const text = bodyEl && childText(bodyEl, "Type") === BODY_TYPE_HTML ? htmlToPlainText(data) : data;
+            const mime = Buffer.from(
+                buildPlainTextMime({
+                    subject: partial.subject ?? existing?.subject ?? "",
+                    from: existing?.from ?? (mailbox ? { address: mailbox.primarySmtpAddress, displayName: mailbox.displayName, type: RecipientType.TO } : undefined),
+                    recipients: partial.recipients ?? existing?.recipients ?? [],
+                    date: existing?.sentDate ?? new Date(),
+                    text,
+                }),
+                "utf-8",
+            );
+            const sealed: Record<string, any> | undefined = await options?.sealDraftBody?.(mime);
+            if (sealed) {
+                Object.assign(partial, sealed);
+                return partial;
+            }
             // Always a fresh key, never an overwrite of `existing.bodyBlobKey`: an existing blob may be shared, and
             // leaving it intact means a Change that then fails its version check can't corrupt the stored body.
             const bodyBlobKey = `bodies/${crypto.randomUUID()}`;
-            const mime = buildPlainTextMime({
-                subject: partial.subject ?? existing?.subject ?? "",
-                from: existing?.from ?? (mailbox ? { address: mailbox.primarySmtpAddress, displayName: mailbox.displayName, type: RecipientType.TO } : undefined),
-                recipients: partial.recipients ?? existing?.recipients ?? [],
-                date: existing?.sentDate ?? new Date(),
-                text,
-            });
-            await this.blobStore!.put(bodyBlobKey, Buffer.from(mime, "utf-8"), { contentType: "message/rfc822" });
+            await this.blobStore!.put(bodyBlobKey, mime, { contentType: "message/rfc822" });
             partial.bodyBlobKey = bodyBlobKey;
             partial.bodyPreview = text.slice(0, 200);
+            if (existing && isZeroAccessMessage(existing)) {
+                (partial as any).zeroAccess = null;
+            }
         }
 
         return partial;

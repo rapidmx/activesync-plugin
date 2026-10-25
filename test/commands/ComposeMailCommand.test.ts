@@ -377,6 +377,32 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
             expect(messageRepo.update).not.toHaveBeenCalled();
         });
 
+        it("Removes the relay scan's sanitized HTML when no readable copy names it, logging a removal that fails, and keeps it for a readable Sent Items copy.", async () => {
+            const scanned = (command: any) => {
+                command.scanPipeline.run = vi.fn(async () => ({
+                    spam: { verdict: "clean", symbols: [] },
+                    av: { verdict: "clean" },
+                    references: [],
+                    encrypted: false,
+                    sanitizedHtml: "<p>Body</p>",
+                }));
+                command.blobStore.delete = vi.fn().mockRejectedValue(new Error("store down"));
+                command.logger = { warn: vi.fn(), info: vi.fn() };
+                return command;
+            };
+
+            const unsaved = scanned(build(SendMailCommandMongo).command);
+            expect(await unsaved.handle(ctx({}))).toBeUndefined();
+            expect(unsaved.blobStore.delete).toHaveBeenCalledWith(expect.stringMatching(/^sanitized\//));
+            expect(unsaved.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/failed to remove the sanitized HTML/));
+
+            const { command, messageRepo } = build(SendMailCommandMongo);
+            const saved = scanned(command);
+            await saved.handle(ctx({ SaveInSentItems: "" }));
+            expect(saved.blobStore.delete).not.toHaveBeenCalled();
+            expect(messageRepo.create.mock.calls[0][0].sanitizedHtmlBlobKey).toMatch(/^sanitized\//);
+        });
+
         it("Publishes nothing when SaveInSentItems is off and there is no original to flag.", async () => {
             const { command, sendMessage, messageRepo, send } = build(SendMailCommandMongo);
 
