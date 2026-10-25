@@ -925,6 +925,10 @@ export abstract class SyncCommand implements EasCommandHandler {
      * and sends back unchanged leaves the protected value alone. That includes an empty string for a sealed field whose placeholder is
      * empty (a location, a contact's or task's notes): the device was shown nothing there, so `""` is what it was shown, not a clear -
      * the restapi sealer only matches the placeholder itself (`null`), and would otherwise drop the sealed value.
+     *
+     * A sealed list shown as an empty one (a contact's phones, addresses or categories) can't be changed from a device: the device was
+     * shown none of the list, so anything it sends is its additions alone, and sealing that would replace the whole hidden list. Such a
+     * change is refused (Status 6, like a sealed draft's subject-only change) rather than lose the entries the device never saw.
      */
     private async sealDeviceWrite(round: CollectionRound, body: any, existing: any): Promise<void> {
         const type = COLLECTION_DATA_TYPES[round.collectionClass];
@@ -932,9 +936,14 @@ export abstract class SyncCommand implements EasCommandHandler {
             return;
         }
         for (const field of existing ? PROTECTED_FIELDS[type]! : []) {
+            if (existing.sealedFields?.[field.name] === undefined) {
+                continue;
+            }
             const placeholder: unknown = field.placeholder(existing);
-            if (body[field.name] === "" && existing.sealedFields?.[field.name] !== undefined && (placeholder == null || placeholder === "")) {
+            if (body[field.name] === "" && (placeholder == null || placeholder === "")) {
                 delete body[field.name];
+            } else if (Array.isArray(placeholder) && placeholder.length === 0 && Array.isArray(body[field.name]) && body[field.name].length > 0) {
+                throw new Error(`The sealed ${field.name} of this item can't be changed from a device.`);
             }
         }
         await this.recordSealer.sealWrite(type, await round.getFolderMailbox(), body, existing);

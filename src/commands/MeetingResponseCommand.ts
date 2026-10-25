@@ -16,6 +16,7 @@ import {
     boundIndexedValue,
     buildEventIcs,
     type CalendarEvent,
+    findPagesByUid,
     hasMailAccess,
     type Mailbox,
     type Message,
@@ -278,15 +279,20 @@ export abstract class MeetingResponseCommand implements EasCommandHandler {
         // `ModelUtils.literal()`, and exact-matched in memory as restapi's `ScanQueueJob.findCalendarEventRows()` does -
         // a UID like `ne(x)` must never be parsed as a query operator and select (and let a decline delete) a different
         // meeting.
+        // Every row of the series is read (keyset-paged): the master and each of its overrides share the UID, and a series
+        // with more overrides than one page holds must still find its master rather than answer one occurrence.
         const key: string = boundIndexedValue(icalUid);
-        const events: StoredEvent[] = (
-            await this.calendarEventRepo!.find({ mailboxUid: ctx.mailboxUid, icalUid: ModelUtils.literal(key), limit: 50 } as any, {
-                ignoreACL: true,
-                limit: 50,
-            })
-        ).filter((row: StoredEvent) => row.icalUid === key && row.mailboxUid === ctx.mailboxUid);
-        // The series master (no `recurrenceId`) is what a response to the whole invitation applies to.
-        return events.find((candidate) => !candidate.recurrenceId) ?? events[0];
+        let first: StoredEvent | undefined;
+        for await (const rows of findPagesByUid<StoredEvent>(this.calendarEventRepo!, { mailboxUid: ctx.mailboxUid, icalUid: ModelUtils.literal(key) })) {
+            const events = rows.filter((row: StoredEvent) => row.icalUid === key && row.mailboxUid === ctx.mailboxUid);
+            // The series master (no `recurrenceId`) is what a response to the whole invitation applies to.
+            const master = events.find((candidate) => !candidate.recurrenceId);
+            if (master) {
+                return master;
+            }
+            first ??= events[0];
+        }
+        return first;
     }
 
     /** The iCalendar `UID` of a meeting request message's `text/calendar` part, if it has one. */

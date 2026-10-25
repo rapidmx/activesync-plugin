@@ -9,7 +9,7 @@
 // threading every combination through a full HTTP+DB round trip, and newEntityDefaults() in isolation.
 import { WbxmlCodePage } from "../../src/codec/WbxmlCodePages.js";
 import { element, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
-import { EmailSyncAdapter } from "../../src/adapters/EmailSyncAdapter.js";
+import { EmailSyncAdapter, forEachBounded } from "../../src/adapters/EmailSyncAdapter.js";
 import { decodeTimeZoneInformation } from "../../src/TimeZoneInfo.js";
 import { ENCRYPTED_PLACEHOLDER_TEXT, ZERO_ACCESS_PLACEHOLDER_TEXT } from "../../src/ZeroAccess.js";
 import { FolderType, MessageImportance, RecipientType, type Mailbox, type Message } from "@rapidmx/restapi";
@@ -632,6 +632,63 @@ describe("EmailSyncAdapter Tests", () => {
             attachmentFind.mockClear();
             await adapter.toApplicationDataBatch([{ ...baseMessage, hasAttachments: false }]);
             expect(attachmentFind).not.toHaveBeenCalled();
+        });
+
+        it("Renders every attachment of a message with several, reading the rows in pages rather than capping them at one per message.", async () => {
+            const { adapter, attachmentFind } = buildAdapter();
+            const row = (n: number) => ({ uid: `att-${String(n).padStart(4, "0")}`, messageUid: "m1", filename: `file-${n}.txt`, mimeType: "text/plain", sizeBytes: 1, isInline: false });
+            attachmentFind.mockResolvedValueOnce(Array.from({ length: 1000 }, (_, i) => row(i))).mockResolvedValueOnce([row(1000), row(1001), row(1002)]);
+
+            const [rendered] = await adapter.toApplicationDataBatch([{ ...baseMessage, uid: "m1", hasAttachments: true }]);
+
+            expect(attachmentsOf(rendered)).toHaveLength(1003);
+            expect(attachmentFind).toHaveBeenCalledTimes(2);
+            expect(attachmentFind.mock.calls[0][1].limit).toBe(1000);
+            expect(attachmentFind.mock.calls[0][0].uid).toBeUndefined();
+            expect(attachmentFind.mock.calls[1][0]).toMatchObject({ messageUid: "in(m1)", uid: "gt(att-0999)" });
+        });
+
+        it("Reads and parses at most a few message blobs at once for a page, rendering every message's body and invite.", async () => {
+            const { adapter, get } = buildAdapter();
+            let inFlight = 0;
+            let peak = 0;
+            get.mockImplementation(async (key: string) => {
+                inFlight++;
+                peak = Math.max(peak, inFlight);
+                await new Promise((resolve) => setTimeout(resolve, 1));
+                inFlight--;
+                return key.startsWith("invite/") ? inviteRawMime(VALID_INVITE_ICS) : Buffer.from(`Subject: X\r\n\r\nBody of ${key}`, "utf-8");
+            });
+            const messages: Message[] = Array.from({ length: 100 }, (_, i) => ({ ...baseMessage, uid: `m${i}`, bodyBlobKey: `bodies/${i}` }));
+            const invites: Message[] = Array.from({ length: 20 }, (_, i) => ({ ...baseMessage, uid: `i${i}`, bodyBlobKey: `invite/${i}`, meetingMethod: "REQUEST" }));
+
+            const rendered = await adapter.toApplicationDataBatch([...messages, ...invites], { type: "1" });
+
+            // Bodies and invites are two lookups running side by side, each bounded on its own.
+            expect(peak).toBeLessThanOrEqual(16);
+            expect(get).toHaveBeenCalledTimes(140);
+            const body = rendered[42].children.find((c) => c.tag === "Body")!;
+            expect(fieldOf(body, "Data")).toBe("Body of bodies/42");
+            expect(rendered.slice(100).every((el) => meetingRequestOf(el) !== undefined)).toBe(true);
+        });
+
+        it("forEachBounded runs every task with no more than its limit at once, and nothing for no items.", async () => {
+            let inFlight = 0;
+            let peak = 0;
+            const done: number[] = [];
+            await forEachBounded(Array.from({ length: 30 }, (_, i) => i), 4, async (n) => {
+                inFlight++;
+                peak = Math.max(peak, inFlight);
+                await new Promise((resolve) => setTimeout(resolve, 1));
+                inFlight--;
+                done.push(n);
+            });
+            expect(peak).toBe(4);
+            expect(done.sort((a, b) => a - b)).toEqual(Array.from({ length: 30 }, (_, i) => i));
+
+            const task = vi.fn();
+            await forEachBounded([], 4, task);
+            expect(task).not.toHaveBeenCalled();
         });
 
         it("Renders a MeetingRequest for a REQUEST invite whose raw MIME has a readable .ics, derived via the shared restapi invite-parsing utilities.", async () => {

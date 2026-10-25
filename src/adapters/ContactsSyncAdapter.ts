@@ -147,6 +147,10 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
      * phone number this protocol simply has no way to round-trip, on the next edit of *any* phone field -
      * discovered live via a spec audit, not a hypothetical. `existing` is `undefined` only for client-originated
      * `Add`, where there's nothing to carry forward yet.
+     *
+     * **Emails** likewise keep every existing address past the third: `toApplicationData` only shows the device
+     * `Email1/2/3Address`, so a device can neither see nor remove the rest. For a protected contact this also keeps
+     * an unchanged list equal to its placeholder (every address), which the sealer then leaves sealed as it was.
      */
     public fromApplicationData(el: WbxmlElement, existing?: Contact): Partial<Contact> {
         const partial: Partial<Contact> = {};
@@ -163,9 +167,12 @@ export class ContactsSyncAdapter implements EasCollectionSyncAdapter<Contact> {
         if (jobTitle !== undefined) partial.jobTitle = jobTitle;
 
         if (EMAIL_TAGS.some((tag) => findChild(el, tag))) {
-            partial.emails = EMAIL_TAGS.map((tag) => childText(el, tag))
-                .filter((address): address is string => !!address)
-                .map((address) => ({ address, type: ContactAddressKind.OTHER }));
+            partial.emails = [
+                ...EMAIL_TAGS.map((tag) => childText(el, tag))
+                    .filter((address): address is string => !!address)
+                    .map((address) => ({ address, type: ContactAddressKind.OTHER })),
+                ...(existing?.emails ?? []).slice(EMAIL_TAGS.length),
+            ];
         }
 
         const phoneEntries = Object.entries(PHONE_TAG) as [ContactAddressKind, string][];

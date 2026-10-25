@@ -162,6 +162,25 @@ describe("ContactsSyncAdapter Tests", () => {
             ]);
         });
 
+        it("Keeps every existing email past the third, which the device was never shown, across a rebuild.", () => {
+            const existing: Contact = {
+                ...baseContact,
+                emails: ["a", "b", "c", "d", "e"].map((name) => ({ address: `${name}@example.com`, type: ContactAddressKind.WORK })),
+            };
+            const el = appData([
+                textElement(WbxmlCodePage.Contacts, "Email1Address", "a@example.com"),
+                textElement(WbxmlCodePage.Contacts, "Email2Address", "b2@example.com"),
+                textElement(WbxmlCodePage.Contacts, "Email3Address", "c@example.com"),
+            ]);
+            expect(adapter.fromApplicationData(el, existing).emails).toEqual([
+                { address: "a@example.com", type: ContactAddressKind.OTHER },
+                { address: "b2@example.com", type: ContactAddressKind.OTHER },
+                { address: "c@example.com", type: ContactAddressKind.OTHER },
+                { address: "d@example.com", type: ContactAddressKind.WORK },
+                { address: "e@example.com", type: ContactAddressKind.WORK },
+            ]);
+        });
+
         it("Leaves phones untouched when neither Home nor Business phone tag is present.", () => {
             const el = appData([textElement(WbxmlCodePage.Contacts, "FileAs", "X")]);
             expect(adapter.fromApplicationData(el).phones).toBeUndefined();

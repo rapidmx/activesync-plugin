@@ -2249,6 +2249,186 @@ describe("Route:EasRouteMongo Tests", () => {
                 });
             });
 
+            describe("Second review fixes", () => {
+                const responseOf = (response: WbxmlElement, tag: string) => findChild(findChild(collectionOf(response), "Responses") ?? element(WbxmlCodePage.AirSync, "Responses", []), tag);
+                const compact = (date: Date) => date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+                /** A daily series starting 2026-01-01 10:00 UTC, its master created after or before `overrides` override rows. */
+                const longSeries = async (mailboxUid: string, folderUid: string, overrides: number, masterFirst: boolean, attendees: any[] = []) => {
+                    const icalUid = `${uuid.v4()}@example.com`;
+                    const day = (n: number) => new Date(Date.UTC(2026, 0, 1 + n, 10));
+                    const createMaster = () =>
+                        createCalendarEvent(mailboxUid, folderUid, {
+                            icalUid,
+                            attendees,
+                            startDate: day(0),
+                            endDate: new Date(day(0).getTime() + 30 * 60_000),
+                            recurrenceRule: { freq: RecurrenceFrequency.DAILY, interval: 1, exceptions: [] },
+                        });
+                    const master: any = masterFirst ? await createMaster() : undefined;
+                    const rows: any[] = [];
+                    for (let n = 1; n <= overrides; n++) {
+                        rows.push(
+                            await createCalendarEvent(mailboxUid, folderUid, {
+                                icalUid,
+                                attendees,
+                                title: `Override ${n}`,
+                                startDate: day(n),
+                                endDate: new Date(day(n).getTime() + 30 * 60_000),
+                                recurrenceId: day(n),
+                            }),
+                        );
+                    }
+                    return { icalUid, day, master: master ?? (await createMaster()), overrides: rows };
+                };
+
+                it("Lists every attachment of a message that has several in Sync, not one per message.", async () => {
+                    const mailbox = await createMailbox(owner.uid);
+                    await provisionDevice("dev1");
+                    const inbox = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+                    const message = await createMessage(mailbox.uid, inbox.uid, { hasAttachments: true });
+                    const attachments = [];
+                    for (const n of [1, 2, 3]) {
+                        attachments.push(await createAttachment(message.uid, inbox.uid, mailbox.uid, Buffer.from(`file ${n}`), { filename: `file-${n}.txt` }));
+                    }
+
+                    const response = await postWbxml("Sync", "dev1", syncRequest(await initialSyncKey("Email", inbox.uid), "Email", inbox.uid));
+
+                    const add = findChild(findChild(collectionOf(response), "Commands")!, "Add")!;
+                    const listed = findChildren(findChild(findChild(add, "ApplicationData")!, "Attachments")!, "Attachment").map((el) => childText(el, "FileReference"));
+                    expect(listed.sort()).toEqual(attachments.map((attachment) => attachment.uid).sort());
+                });
+
+                it("Finds an occurrence's override past the first page of a long series: an InstanceId Change updates it and an InstanceId Delete deletes it, rather than duplicating it or adding an exception.", async () => {
+                    const mailbox = await createMailbox(owner.uid);
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    const series = await longSeries(mailbox.uid, folder.uid, 60, true);
+                    const changed = series.overrides[59];
+                    const deleted = series.overrides[58];
+                    const instance = (serverId: string, kind: "Change" | "Delete", recurrenceId: Date, fields?: WbxmlElement[]) =>
+                        element(WbxmlCodePage.AirSync, kind, [
+                            textElement(WbxmlCodePage.AirSync, "ServerId", serverId),
+                            textElement(WbxmlCodePage.AirSyncBase, "InstanceId", compact(recurrenceId)),
+                            ...(fields ? [element(WbxmlCodePage.AirSync, "ApplicationData", fields)] : []),
+                        ]);
+
+                    const edited = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Calendar", folder.uid), "Calendar", folder.uid, [
+                            instance(series.master.uid, "Change", series.day(60), [textElement(WbxmlCodePage.Calendar, "Subject", "Moved standup")]),
+                        ]),
+                    );
+                    expect(responseOf(edited, "Change")).toBeUndefined();
+                    const live = async () => (await byIcalUid(calendarEventRepo, series.icalUid)).filter((row: any) => !row.deleted);
+                    expect(await live()).toHaveLength(61);
+                    expect((await byUid(calendarEventRepo, changed.uid)).title).toBe("Moved standup");
+
+                    const removed = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(edited), "SyncKey")!, "Calendar", folder.uid, [instance(series.master.uid, "Delete", series.day(59))]),
+                    );
+                    expect(responseOf(removed, "Delete")).toBeUndefined();
+                    const rows = await live();
+                    expect(rows).toHaveLength(60);
+                    expect(rows.some((row: any) => row.uid === deleted.uid)).toBe(false);
+                    expect((await byUid(calendarEventRepo, series.master.uid)).recurrenceRule.exceptions ?? []).toEqual([]);
+                });
+
+                it("Answers a meeting request for the series master even when the series has more overrides than one page holds.", async () => {
+                    const mailbox = await createMailbox(owner.uid);
+                    await provisionDevice("dev1");
+                    const inbox = await createFolderWithAcl(mailbox.uid, { name: "Inbox", type: FolderType.INBOX });
+                    const calendar = await createFolderWithAcl(mailbox.uid, { name: "Calendar", type: FolderType.CALENDAR });
+                    const attendee = { address: mailbox.primarySmtpAddress, role: AttendeeRole.REQUIRED, responseStatus: AttendeeResponseStatus.NEEDS_ACTION, isOrganizer: false };
+                    const series = await longSeries(mailbox.uid, calendar.uid, 60, false, [attendee]);
+                    const ics = ["BEGIN:VCALENDAR", "METHOD:REQUEST", "BEGIN:VEVENT", `UID:${series.icalUid}`, "SEQUENCE:0", "END:VEVENT", "END:VCALENDAR"].join("\r\n");
+                    const invite = await createMessage(mailbox.uid, inbox.uid);
+                    await blobStore().put(
+                        invite.bodyBlobKey,
+                        Buffer.from(["Subject: Invite", "MIME-Version: 1.0", 'Content-Type: multipart/mixed; boundary="b"', "", "--b", "Content-Type: text/plain", "", "Join", "--b", "Content-Type: text/calendar; method=REQUEST", "", ics, "--b--", ""].join("\r\n")),
+                        { contentType: "message/rfc822" },
+                    );
+
+                    const response = await postWbxml(
+                        "MeetingResponse",
+                        "dev1",
+                        element(WbxmlCodePage.MeetingResponse, "MeetingResponse", [
+                            element(WbxmlCodePage.MeetingResponse, "Request", [
+                                textElement(WbxmlCodePage.MeetingResponse, "UserResponse", "1"),
+                                textElement(WbxmlCodePage.MeetingResponse, "RequestId", invite.uid),
+                            ]),
+                        ]),
+                    );
+
+                    const result = findChild(response, "Result")!;
+                    expect(childText(result, "Status")).toBe("1");
+                    expect(childText(result, "CalendarId")).toBe(series.master.uid);
+                    expect((await byUid(calendarEventRepo, series.master.uid)).attendees[0].responseStatus).toBe(AttendeeResponseStatus.ACCEPTED);
+                });
+
+                it("Refuses a device's addition to a protected contact's sealed phones or categories, which it was shown empty, keeping the sealed list; a list with no sealed copy is still sealed.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const protectedMailbox: any = await createMailbox(owner.uid);
+                    protectedMailbox.zeroAccessKeys = [await testZeroAccessKey()];
+                    protectedMailbox.zeroAccessTypes = { contacts: true };
+                    const mailbox = await mailboxRepo.save(protectedMailbox);
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Contacts", type: FolderType.CONTACTS });
+                    const contact = (tag: string, value: string) => textElement(WbxmlCodePage.Contacts, tag, value);
+                    const categories = (...names: string[]) => element(WbxmlCodePage.Contacts, "Categories", names.map((name) => contact("Category", name)));
+                    const add = (clientId: string, fields: WbxmlElement[]) =>
+                        element(WbxmlCodePage.AirSync, "Add", [textElement(WbxmlCodePage.AirSync, "ClientId", clientId), element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+                    const change = (serverId: string, fields: WbxmlElement[]) =>
+                        element(WbxmlCodePage.AirSync, "Change", [textElement(WbxmlCodePage.AirSync, "ServerId", serverId), element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+
+                    const added = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Contacts", folder.uid), "Contacts", folder.uid, [
+                            add("client-1", [contact("FirstName", "Ada"), contact("BusinessPhoneNumber", "555-0101"), contact("MobilePhoneNumber", "555-0102"), categories("Family")]),
+                            add("client-2", [contact("FirstName", "Grace")]),
+                        ]),
+                    );
+                    const [withPhones, without] = findChildren(findChild(collectionOf(added), "Responses")!, "Add").map((el) => childText(el, "ServerId")!);
+                    const sealed: any = await byUid(contactRepo, withPhones);
+                    expect(sealed.phones).toEqual([]);
+                    expect(sealed.sealedFields.phones).toEqual(expect.any(String));
+                    expect(sealed.sealedFields.categories).toEqual(expect.any(String));
+
+                    let key = childText(collectionOf(added), "SyncKey")!;
+                    for (const fields of [[contact("HomePhoneNumber", `${canary} home`)], [categories(canary)]]) {
+                        const refused = await postWbxml("Sync", "dev1", syncRequestWithCommands(key, "Contacts", folder.uid, [change(withPhones, fields)]));
+                        expect(childText(responseOf(refused, "Change")!, "Status")).toBe("6");
+                        key = childText(collectionOf(refused), "SyncKey")!;
+                    }
+                    const kept: any = await byUid(contactRepo, withPhones);
+                    expect(kept.sealedFields.phones).toBe(sealed.sealedFields.phones);
+                    expect(kept.sealedFields.categories).toBe(sealed.sealedFields.categories);
+
+                    // The empty lists the device was shown, sent back with another change, still leave the sealed lists alone.
+                    const echoed = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(key, "Contacts", folder.uid, [change(withPhones, [contact("JobTitle", "Engineer"), categories()])]),
+                    );
+                    expect(responseOf(echoed, "Change")).toBeUndefined();
+                    expect((await byUid(contactRepo, withPhones)).sealedFields.categories).toBe(sealed.sealedFields.categories);
+
+                    const first = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(echoed), "SyncKey")!, "Contacts", folder.uid, [change(without, [contact("HomePhoneNumber", `${canary} home`)])]),
+                    );
+                    expect(responseOf(first, "Change")).toBeUndefined();
+                    const now: any = await byUid(contactRepo, without);
+                    expect(now.phones).toEqual([]);
+                    expect(now.sealedFields.phones).toEqual(expect.any(String));
+                    expect(JSON.stringify(now)).not.toContain(canary);
+                });
+            });
+
             it("Creates a task via a client-originated Add.", async () => {
                 const mailbox = await createMailbox(owner.uid);
                 await provisionDevice("dev1");

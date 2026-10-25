@@ -20,6 +20,7 @@ import {
     type ParsedIcsEvent,
     boundIndexedValue,
     extractIcsFromRaw,
+    findPagesByUid,
     type Folder,
     type Label,
     type Mailbox,
@@ -89,6 +90,22 @@ const LOOKUP_CHUNK = 500;
  * and must never be spliced into an `in(...)` operand, where `me` would resolve to the caller's uid and a comma
  * would split one value into several. */
 const UID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** How many messages of a `Sync` page `resolveBodies()`/`resolveMeetingRequests()` read and parse at once. Each one holds its
+ * whole MIME blob (and, for a plain-text body or an invite, its parsed tree, attachments included) in memory, so a page of
+ * large messages is worked through a few at a time rather than all together. */
+const BLOB_CONCURRENCY = 8;
+
+/** Runs `task` over every item with at most `limit` running at a time. */
+export async function forEachBounded<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+    let next = 0;
+    const worker = async (): Promise<void> => {
+        while (next < items.length) {
+            await task(items[next++]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 
 function labelKey(mailboxUid: string, labelUid: string): string {
     return `${mailboxUid}/${labelUid}`;
@@ -216,7 +233,9 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
     }
 
     /** Resolves every message with `hasAttachments` to its `Attachment` rows, in one `in(...)` query per
-     * `LOOKUP_CHUNK` of message uids rather than one per message - the same batching `resolveLabelNames()` uses. */
+     * `LOOKUP_CHUNK` of message uids rather than one per message - the same batching `resolveLabelNames()` uses.
+     * Unlike a label uid, a message uid matches any number of rows (one per attachment), so each chunk's rows are
+     * read in full, keyset-paged (`findPagesByUid()`), rather than capped at one row per message. */
     private async resolveAttachments(messages: Message[]): Promise<Map<string, Attachment[]>> {
         const byMessage = new Map<string, Attachment[]>();
         const uids = messages.filter((m) => m.hasAttachments).map((m) => m.uid);
@@ -225,10 +244,10 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         }
         for (let i = 0; i < uids.length; i += LOOKUP_CHUNK) {
             const chunk = uids.slice(i, i + LOOKUP_CHUNK);
-            const rows: Attachment[] = await this.attachmentRepo.find({ messageUid: `in(${chunk.join(",")})`, limit: chunk.length } as any, {
-                ignoreACL: true,
-                limit: chunk.length,
-            });
+            const rows: Attachment[] = [];
+            for await (const page of findPagesByUid<Attachment & { uid: string }>(this.attachmentRepo, { messageUid: `in(${chunk.join(",")})` }, 1000)) {
+                rows.push(...page);
+            }
             for (const row of rows) {
                 const list = byMessage.get(row.messageUid) ?? [];
                 list.push(row);
@@ -239,36 +258,34 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
     }
 
     /** Resolves every `meetingMethod === "REQUEST"` message to a rendered `MeetingRequest` element, fetching and
-     * parsing each one's raw MIME in parallel (bounded by the page's own `windowSize`, same as any other
-     * per-batch work here) rather than serially. A message whose `.ics` can't be read or parsed, or that has no
+     * parsing each one's raw MIME in parallel (`BLOB_CONCURRENCY` at a time, within the page's own `windowSize`)
+     * rather than serially. A message whose `.ics` can't be read or parsed, or that has no
      * `StartTime`/`EndTime`, simply has no entry - `render()` then omits the element rather than fail the whole
      * item (see `SyncCommand.ts`'s own comment on why a render failure must never be lightly reintroduced). */
     private async resolveMeetingRequests(messages: Message[], render: SyncRenderContext | undefined): Promise<Map<string, WbxmlElement>> {
         const byMessage = new Map<string, WbxmlElement>();
         const candidates = messages.filter((m) => m.meetingMethod === "REQUEST" && m.bodyBlobKey);
-        await Promise.all(
-            candidates.map(async (message) => {
-                try {
-                    const raw = await this.blobStore!.get(message.bodyBlobKey);
-                    const ics = await extractIcsFromRaw(raw);
-                    const parsed: ParsedIcsEvent | undefined = ics ? parseInviteIcs(ics) : undefined;
-                    if (parsed?.startDate && parsed?.endDate) {
-                        byMessage.set(message.uid, meetingRequestElement(parsed, render));
-                    }
-                } catch {
-                    // Malformed/unreadable .ics: no MeetingRequest for this one message, same tolerant-of-a-bad-
-                    // reference stance as the stale label uids this file already drops silently above.
+        await forEachBounded(candidates, BLOB_CONCURRENCY, async (message) => {
+            try {
+                const raw = await this.blobStore!.get(message.bodyBlobKey);
+                const ics = await extractIcsFromRaw(raw);
+                const parsed: ParsedIcsEvent | undefined = ics ? parseInviteIcs(ics) : undefined;
+                if (parsed?.startDate && parsed?.endDate) {
+                    byMessage.set(message.uid, meetingRequestElement(parsed, render));
                 }
-            }),
-        );
+            } catch {
+                // Malformed/unreadable .ics: no MeetingRequest for this one message, same tolerant-of-a-bad-
+                // reference stance as the stale label uids this file already drops silently above.
+            }
+        });
         return byMessage;
     }
 
     /** Resolves every message to its real body text (not just `bodyPreview`), honoring the device's own
      * `BodyPreference` - mirrors `ItemOperationsCommand.fetchMessage()`'s exact same source-preference and
-     * truncation logic, just applied to a whole `Sync` page in parallel instead of one `ItemOperations Fetch`
-     * at a time. Returns an empty map (every message falls back to `render()`'s own `bodyPreview` default) when
-     * the device sent no `BodyPreference` at all - many real EAS clients do send one and expect the (near-)full
+     * truncation logic, just applied to a whole `Sync` page in parallel (`BLOB_CONCURRENCY` at a time) instead of
+     * one `ItemOperations Fetch` at a time. Returns an empty map (every message falls back to `render()`'s own
+     * `bodyPreview` default) when the device sent no `BodyPreference` at all - many real EAS clients do send one and expect the (near-)full
      * body inline in `Sync` itself, not a short preview requiring a separate `Fetch` round trip for ordinary
      * reading; this was discovered live (a real device showing truncated mail that the web client renders in
      * full), not assumed in advance. A message whose blob can't be read falls back to the short preview, same
@@ -280,44 +297,42 @@ export abstract class EmailSyncAdapter implements EasCollectionSyncAdapter<Messa
         }
         const wantsMime = bodyPreference.type === BODY_TYPE_MIME;
         const wantsHtml = bodyPreference.type === BODY_TYPE_HTML;
-        await Promise.all(
-            messages.map(async (message) => {
-                try {
-                    let type = BODY_TYPE_PLAIN_TEXT;
-                    let text: string;
-                    // `Type 4` (raw MIME) is an explicit request for the verbatim source - same preference
-                    // `ItemOperationsCommand.fetchMessage()` already honors - checked first, ahead of the
-                    // HTML-over-plain-text preference below, since it's the device's own direct ask.
-                    if (wantsMime) {
-                        type = BODY_TYPE_MIME;
-                        text = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
-                    } else if (isZeroAccessMessage(message)) {
-                        // Sealed: nothing here can read it - only its MIME (above) is any use to the device.
-                        text = ZERO_ACCESS_PLACEHOLDER_TEXT;
-                    } else if (isEndToEndEncryptedMessage(message)) {
-                        // Encrypted by its sender: unreadable here too - its MIME is for a device that holds the keys.
-                        text = ENCRYPTED_PLACEHOLDER_TEXT;
-                    } else if (wantsHtml && message.sanitizedHtmlBlobKey) {
-                        type = BODY_TYPE_HTML;
-                        text = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
-                    } else {
-                        const raw = await this.blobStore!.get(message.bodyBlobKey);
-                        const parsed = await simpleParser(raw);
-                        text = parsed.text ?? message.bodyPreview;
-                    }
-                    const estimatedDataSize = Buffer.byteLength(text, "utf8");
-                    let truncated = false;
-                    if (bodyPreference.truncationSize !== undefined && estimatedDataSize > bodyPreference.truncationSize) {
-                        text = truncateUtf8(text, bodyPreference.truncationSize);
-                        truncated = true;
-                    }
-                    byMessage.set(message.uid, { type, data: text, truncated, estimatedDataSize });
-                } catch {
-                    // Blob unreadable/missing: this one message keeps render()'s short-preview fallback rather
-                    // than fail the whole Sync round over it.
+        await forEachBounded(messages, BLOB_CONCURRENCY, async (message) => {
+            try {
+                let type = BODY_TYPE_PLAIN_TEXT;
+                let text: string;
+                // `Type 4` (raw MIME) is an explicit request for the verbatim source - same preference
+                // `ItemOperationsCommand.fetchMessage()` already honors - checked first, ahead of the
+                // HTML-over-plain-text preference below, since it's the device's own direct ask.
+                if (wantsMime) {
+                    type = BODY_TYPE_MIME;
+                    text = (await this.blobStore!.get(message.bodyBlobKey)).toString("utf-8");
+                } else if (isZeroAccessMessage(message)) {
+                    // Sealed: nothing here can read it - only its MIME (above) is any use to the device.
+                    text = ZERO_ACCESS_PLACEHOLDER_TEXT;
+                } else if (isEndToEndEncryptedMessage(message)) {
+                    // Encrypted by its sender: unreadable here too - its MIME is for a device that holds the keys.
+                    text = ENCRYPTED_PLACEHOLDER_TEXT;
+                } else if (wantsHtml && message.sanitizedHtmlBlobKey) {
+                    type = BODY_TYPE_HTML;
+                    text = (await this.blobStore!.get(message.sanitizedHtmlBlobKey)).toString("utf-8");
+                } else {
+                    const raw = await this.blobStore!.get(message.bodyBlobKey);
+                    const parsed = await simpleParser(raw);
+                    text = parsed.text ?? message.bodyPreview;
                 }
-            }),
-        );
+                const estimatedDataSize = Buffer.byteLength(text, "utf8");
+                let truncated = false;
+                if (bodyPreference.truncationSize !== undefined && estimatedDataSize > bodyPreference.truncationSize) {
+                    text = truncateUtf8(text, bodyPreference.truncationSize);
+                    truncated = true;
+                }
+                byMessage.set(message.uid, { type, data: text, truncated, estimatedDataSize });
+            } catch {
+                // Blob unreadable/missing: this one message keeps render()'s short-preview fallback rather
+                // than fail the whole Sync round over it.
+            }
+        });
         return byMessage;
     }
 

@@ -18,6 +18,7 @@ import {
     boundIndexedValue,
     BusyStatus,
     type CalendarEvent,
+    findPagesByUid,
     type RecurrenceRule,
     RecurrenceFrequency,
     RecipientType,
@@ -537,10 +538,18 @@ export function isOrganizedBy(event: CalendarEvent, mailbox: Mailbox): boolean {
  * own identical `InstanceId` handling. Queried by `mailboxUid`/`icalUid` only (no backend indexes or supports
  * exact-`Date` equality in a query, confirmed against this repo's own `recurrenceIdsMatch()` precedent in
  * restapi's `ScanQueueJob`, which takes the same two-step approach), then matched in memory by `getTime()` to
- * dodge any Mongo/SQL date-representation inconsistency a DB-level predicate would risk. */
+ * dodge any Mongo/SQL date-representation inconsistency a DB-level predicate would risk. Every row of the series
+ * is read (keyset-paged, `findPagesByUid()`), not just a first page: the master and each override share the
+ * `icalUid`, and a long-running series can have more overrides than one page holds - a missed override would
+ * have `ensureCalendarOccurrence()` create a duplicate of it. */
 export async function findCalendarOccurrence(repo: RepoUtils<CalendarEvent>, master: CalendarEvent, recurrenceId: Date): Promise<CalendarEvent | undefined> {
-    const rows: CalendarEvent[] = await repo.find({ mailboxUid: master.mailboxUid, icalUid: ModelUtils.literal(master.icalUid), limit: 50 } as any, { ignoreACL: true, limit: 50 });
-    return rows.find((row) => row.recurrenceId && new Date(row.recurrenceId).getTime() === recurrenceId.getTime());
+    for await (const rows of findPagesByUid<CalendarEvent & { uid: string }>(repo, { mailboxUid: master.mailboxUid, icalUid: ModelUtils.literal(master.icalUid) })) {
+        const match = rows.find((row) => row.recurrenceId && new Date(row.recurrenceId).getTime() === recurrenceId.getTime());
+        if (match) {
+            return match;
+        }
+    }
+    return undefined;
 }
 
 /** `findCalendarOccurrence()`, creating the occurrence's own override row when none exists yet - a full copy
