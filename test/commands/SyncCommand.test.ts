@@ -1219,6 +1219,80 @@ describe("SyncCommand Tests (isolated)", () => {
                 expect(repo.update).not.toHaveBeenCalled();
             });
 
+            describe("decided before the device's body is sealed, as the server's storeBody() does", () => {
+                const bodyChange = () =>
+                    syncRequest("Email", [
+                        element(WbxmlCodePage.AirSync, "Change", [
+                            textElement(WbxmlCodePage.AirSync, "ServerId", "item-1"),
+                            element(WbxmlCodePage.AirSync, "ApplicationData", [element(WbxmlCodePage.AirSyncBase, "Body", [textElement(WbxmlCodePage.AirSyncBase, "Data", "new")])]),
+                        ]),
+                    ]);
+                /** A command whose Change seals through a `ZeroAccessWriter` (`draftWriteOptions()`), as the real adapter does. */
+                const buildSealing = async (existing: any, matterRepo: any, target: any = { keys: [] }) => {
+                    const repo = fakeRepo({
+                        findOne: vi.fn().mockResolvedValue(existing),
+                        update: vi.fn().mockImplementation(async (obj: any) => ({ ...existing, ...obj, version: 2 })),
+                        count: vi.fn().mockResolvedValue(0),
+                    });
+                    const adapter = fakeAdapter({ collectionClass: "Email", fromApplicationData: async (_data, _existing, _mailbox, options) => (await options!.sealDraftBody!(Buffer.from("mime")))! });
+                    const harness = await buildCommand("Email", adapter, repo, { folder: { uid: FOLDER_UID, mailboxUid: "mbx-1", type: FolderType.DRAFTS } });
+                    const writer = {
+                        sealDraft: vi.fn().mockResolvedValue({ ...sealed, bodyPreview: "", indexEntryUid: "entry-1" }),
+                        removeIndexEntry: vi.fn().mockResolvedValue(undefined),
+                        target: vi.fn().mockResolvedValue(target),
+                    };
+                    const blobStore = { delete: vi.fn().mockResolvedValue(undefined) };
+                    Object.assign(harness.command as any, { zeroAccessWriter: writer, blobStore, matterRepo });
+                    return { ...harness, repo, writer, blobStore };
+                };
+
+                it("Refuses a draft at the bound without sealing anything, so its index entry is left as it was.", async () => {
+                    const full = Array.from({ length: MAX_RETAINED_BODY_BLOB_KEYS }, (_, i) => `bodies/${i}`);
+                    const { command, repo, writer, blobStore } = await buildSealing(draft("za/mbx-1/drafts/old", { zeroAccess: { sealed: true }, retainedBodyBlobKeys: full }), holding());
+
+                    const response = await command.handle(buildContext(bodyChange()).ctx);
+
+                    expect(responseStatus(response, "Change")).toBe("6");
+                    expect(writer.sealDraft).not.toHaveBeenCalled();
+                    expect(writer.removeIndexEntry).not.toHaveBeenCalled();
+                    expect(blobStore.delete).not.toHaveBeenCalled();
+                    expect(repo.update).not.toHaveBeenCalled();
+                });
+
+                it("Looks the hold up once, and records the replaced body by the update.", async () => {
+                    const matters = holding();
+                    const { command, repo, writer } = await buildSealing(draft("bodies/old"), matters);
+
+                    await command.handle(buildContext(bodyChange()).ctx);
+
+                    expect(writer.sealDraft).toHaveBeenCalledTimes(1);
+                    expect(matters.find).toHaveBeenCalledTimes(1);
+                    expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual(["bodies/old"]);
+                });
+
+                it("Decides a seal the check didn't foresee (the mailbox turned zero-access in between) after it.", async () => {
+                    const matters = holding();
+                    const { command, repo, writer } = await buildSealing(draft("bodies/old"), matters, undefined);
+
+                    await command.handle(buildContext(bodyChange()).ctx);
+
+                    expect(writer.sealDraft).toHaveBeenCalledTimes(1);
+                    expect(matters.find).toHaveBeenCalledTimes(1);
+                    expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual(["bodies/old"]);
+                });
+
+                it("Checks nothing ahead for a Change that carries no Body.", async () => {
+                    const matters = holding();
+                    const { command, writer } = await buildSealing(draft("bodies/old"), matters);
+
+                    await command.handle(buildContext(changeRequest()).ctx);
+
+                    expect(writer.target).not.toHaveBeenCalled();
+                    // This fake adapter seals anyway, so the hold is decided after the seal.
+                    expect(matters.find).toHaveBeenCalledTimes(1);
+                });
+            });
+
             it("Never looks a hold up for, or deletes, a replaced body a draft save didn't store.", async () => {
                 const matters = holding();
                 const { command, blobStore } = await build(draft("blobs/delivered"), matters);

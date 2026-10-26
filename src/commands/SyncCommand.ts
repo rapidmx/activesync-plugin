@@ -72,6 +72,8 @@ const COLLECTION_DATA_TYPES: Readonly<Record<string, "calendar" | "contacts" | "
 const SEARCH_INDEXED_FIELDS: readonly string[] = ["subject", "recipients", "flags", "bodyBlobKey"];
 /** `draftWriteOptions()`'s options, which also record what their `sealDraftBody` sealed. */
 type DraftWriteOptions = SyncWriteOptions & { sealed?: ZeroAccessSealedFields };
+/** `bodyRetention()`: whether a draft body a sealing Change replaces is held, and the `retainedBodyBlobKeys` that then record it. */
+type BodyRetention = { held: boolean; retained?: string[] };
 /** The fields of an event made from a zero-access invitation that its `sealedContent` holds, sealed whole (restapi `specs/search.md` §4). */
 const SEALED_CONTENT_FIELDS: readonly string[] = ["title", "location", "description", "descriptionHtml"];
 const { Config, Init, Inject, Logger } = ObjectDecorators;
@@ -935,6 +937,12 @@ export abstract class SyncCommand implements EasCommandHandler {
         const options: DraftWriteOptions | undefined = this.draftWriteOptions(round, existing.uid);
         let updated: any;
         try {
+            // Decided before anything is sealed, as the server's `storeBody()` does: a draft at the retention bound is refused (409)
+            // before its seal replaces the draft's index entry, which the failed save would otherwise leave missing or stale.
+            const retention: BodyRetention | undefined =
+                options && findChild(appData, "Body") && replacesComposedBody(existing) && (await this.zeroAccessWriter!.target(await round.getFolderMailbox()))
+                    ? await this.bodyRetention(existing)
+                    : undefined;
             const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox(), options);
             const patch: any = { uid: existing.uid, version: existing.version, ...partial };
             if (
@@ -949,10 +957,11 @@ export abstract class SyncCommand implements EasCommandHandler {
             await this.sealDeviceWrite(round, patch, existing);
             // A sealing Change replaces the draft's body. Under a legal hold the replaced one is kept, and recorded by this same
             // version-checked update (server `BaseMailComposeRoute.storeBody()`); a draft already retaining the most it may is refused.
+            // Only a seal the check above didn't foresee (the mailbox turned zero-access in between) is decided here, after it.
             const replacesBody: boolean = !!patch.zeroAccess && replacesComposedBody(existing);
-            const held: boolean = replacesBody && (await this.isHeldForBodyReplacement(existing.mailboxUid));
+            const { held, retained }: BodyRetention = replacesBody ? (retention ?? (await this.bodyRetention(existing))) : { held: false };
             if (held) {
-                patch.retainedBodyBlobKeys = withRetainedBodyBlobKey(existing, existing.bodyBlobKey);
+                patch.retainedBodyBlobKeys = retained;
             }
             updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
             if (patch.zeroAccess) {
@@ -1122,6 +1131,13 @@ export abstract class SyncCommand implements EasCommandHandler {
         } catch (err: any) {
             this.logger?.warn(`SyncCommand: could not remove the replaced body of sealed draft ${previous.uid}: ${err?.message ?? err}`);
         }
+    }
+
+    /** Whether `draft`'s body, which a device's sealing Change replaces, is held (`isHeldForBodyReplacement()`), and if so the
+     * `retainedBodyBlobKeys` that record it. Throws 409 when the draft already retains `MAX_RETAINED_BODY_BLOB_KEYS` bodies. */
+    private async bodyRetention(draft: any): Promise<BodyRetention> {
+        const held: boolean = await this.isHeldForBodyReplacement(draft.mailboxUid);
+        return held ? { held, retained: withRetainedBodyBlobKey(draft, draft.bodyBlobKey) } : { held };
     }
 
     /**

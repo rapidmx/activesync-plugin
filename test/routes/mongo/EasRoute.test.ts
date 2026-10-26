@@ -47,6 +47,7 @@ import {
     ZeroAccessWriter,
     zeroAccessDraftBlobPrefix,
     zeroAccessIndexEntryUid,
+    MAX_RETAINED_BODY_BLOB_KEYS,
 } from "@rapidmx/restapi";
 
 const mongod: MongoMemoryServer = new MongoMemoryServer({
@@ -2205,6 +2206,58 @@ describe("Route:EasRouteMongo Tests", () => {
                     } finally {
                         await matterRepo.deleteMany({});
                     }
+                });
+
+                it("Refuses a held device edit of a draft already retaining the most bodies it may before sealing it: a sealed draft keeps its index entry, a readable one gets none.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const full = Array.from({ length: MAX_RETAINED_BODY_BLOB_KEYS }, (_, i) => `bodies/retained-${i}`);
+                    const readable = await createMessage(mailbox.uid, folder.uid, { subject: "Readable draft", retainedBodyBlobKeys: full });
+                    await blobStore().put(readable.bodyBlobKey, Buffer.from("Subject: Readable draft\r\n\r\nold body"), { contentType: "message/rfc822" });
+                    const sealing = await createMessage(mailbox.uid, folder.uid, { subject: "Sealed draft" });
+                    await blobStore().put(sealing.bodyBlobKey, Buffer.from("Subject: Sealed draft\r\n\r\nold body"), { contentType: "message/rfc822" });
+                    const entryRepo: any = (objectFactory.getInstance(ConnectionManager)!.connections.get("mongo") as any).getMongoRepository("ZeroAccessIndexEntryMongo");
+                    const matterRepo: any = (objectFactory.getInstance(ConnectionManager)!.connections.get("mongo") as any).getMongoRepository("MatterMongo");
+
+                    // Sealed while no Matter holds the mailbox, then made to retain the most bodies it may.
+                    const first = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Email", folder.uid), "Email", folder.uid, [change(sealing.uid, [textBody("sealed body")])]),
+                    );
+                    expect(responseOf(first, "Change")).toBeUndefined();
+                    const sealed: any = await byUid(messageRepo, sealing.uid);
+                    expect(sealed.zeroAccess).toBeTruthy();
+                    sealed.retainedBodyBlobKeys = full;
+                    await messageRepo.save(sealed);
+                    const entry: any = await entryRepo.findOne({ uid: zeroAccessIndexEntryUid(sealing.uid) });
+                    expect(entry).toBeTruthy();
+
+                    await matterRepo.save(new MatterMongo({ name: "Hold", escrowScopeId: "scope-1", custodianMailboxUids: [mailbox.uid] }));
+                    try {
+                        const refused = await postWbxml(
+                            "Sync",
+                            "dev1",
+                            syncRequestWithCommands(childText(collectionOf(first), "SyncKey")!, "Email", folder.uid, [
+                                change(sealing.uid, [textBody(`${canary} sealed edit`)]),
+                                change(readable.uid, [textBody(`${canary} readable edit`)]),
+                            ]),
+                        );
+                        const statuses = findChildren(findChild(collectionOf(refused), "Responses")!, "Change").map((el) => [childText(el, "ServerId"), childText(el, "Status")]);
+                        expect(statuses).toEqual(expect.arrayContaining([[sealing.uid, "6"], [readable.uid, "6"]]));
+                    } finally {
+                        await matterRepo.deleteMany({});
+                    }
+                    // The sealed draft's entry is the one its last save wrote; the readable draft has none for the body it never got.
+                    expect(await entryRepo.findOne({ uid: zeroAccessIndexEntryUid(sealing.uid) })).toEqual(entry);
+                    expect(await entryRepo.findOne({ uid: zeroAccessIndexEntryUid(readable.uid) })).toBeNull();
+                    expect((await byUid(messageRepo, sealing.uid)).bodyBlobKey).toBe(sealed.bodyBlobKey);
+                    expect((await byUid(messageRepo, readable.uid)).bodyBlobKey).toBe(readable.bodyBlobKey);
+                    // Nothing of the refused edits was stored, sealed or readable.
+                    expect([...(blobStore() as any).store.keys()].filter((key: string) => key.startsWith(`za/${mailbox.uid}/drafts/`))).toEqual([sealed.bodyBlobKey]);
+                    expect(stored(canary)).toBe(false);
                 });
 
                 it("Seals the title and location of one occurrence a device edits in a protected calendar (InstanceId), rather than storing them readable.", async () => {
