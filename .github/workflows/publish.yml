@@ -11,30 +11,57 @@ permissions:
   contents: read
 
 jobs:
+  # A release pushes main and its tag at the same commit, and each push runs Build. Publish only from the tag's own Build,
+  # and only once every Build of that commit has finished green: a failed run on either ref (even one that passes when
+  # rerun) blocks the release until it is rerun green, which triggers this workflow again.
   check:
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success'
-    outputs:
-      is_release_tag: ${{ steps.gate.outputs.is_release_tag }}
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Determine if this build was for a tag on main
-        id: gate
+      - name: Require a release tag on main and every Build of its commit green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
         run: |
-          tag=$(git tag --points-at HEAD)
-          if [ -n "$tag" ] && git merge-base --is-ancestor HEAD origin/main; then
-            echo "is_release_tag=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_release_tag=false" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if ! git tag --points-at HEAD | grep -qxF "$TAG" || ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag $TAG doesn't point at $SHA on main; not publishing."
+            exit 1
           fi
+          url="repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?head_sha=$SHA&per_page=100"
+          for attempt in $(seq 1 90); do
+            pending=$(gh api "$url" --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+            failed=$(gh api "$url" --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion != "success")
+              | "\(.id) (\(.head_branch)): \(.conclusion)"] | join(", ")')
+            if [ -n "$failed" ]; then
+              echo "::error::Not publishing $TAG: a Build of $SHA did not succeed: $failed. Rerun it; a green rerun triggers this workflow again."
+              exit 1
+            fi
+            if [ "$pending" = 0 ]; then
+              echo "Every Build of $SHA succeeded: $(gh api "$url" --jq '[.workflow_runs[] | "\(.id) (\(.head_branch))"] | join(", ")')"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Timed out waiting for the other Builds of $SHA to finish."
+          exit 1
 
   publish:
     needs: check
-    if: needs.check.outputs.is_release_tag == 'true'
     runs-on: ubuntu-latest
     environment: publish
     steps:

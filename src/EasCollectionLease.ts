@@ -188,11 +188,14 @@ export class EasCollectionLease {
             let answered = false;
             for (;;) {
                 const setting = client.set(redisKey, token, { condition: "NX", expiration: { type: "PX", value: options.ttlMs } });
-                const reply = await withTimeout(setting, answered ? pollTimeout() : redisTimeoutMs);
+                // A SET after Redis has answered is cut short by the wait's deadline, not just by redisTimeoutMs.
+                const limit: number = answered ? pollTimeout() : redisTimeoutMs;
+                const reply = await withTimeout(setting, limit);
                 if (reply === TIMED_OUT) {
                     // Give back the key should the SET still land.
                     setting.then((late) => (late === "OK" ? releaseRedis(client) : undefined)).catch(() => undefined);
-                    if (answered && Date.now() >= deadline) {
+                    // Decided by the limit applied, not by re-reading the clock: a timer may fire a millisecond before Date.now() reaches the deadline.
+                    if (answered && limit < redisTimeoutMs) {
                         // Redis is up and another copy holds the key - only the wait ran out.
                         releaseLocal();
                         return undefined;
