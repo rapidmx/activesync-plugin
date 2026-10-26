@@ -882,7 +882,7 @@ export abstract class SyncCommand implements EasCommandHandler {
         } catch (err: any) {
             if (!created) {
                 // A draft that was never created: the body its seal stored goes with it.
-                await this.discardLosingSeal(options);
+                await this.discardLosingSeal(round, options, undefined);
             }
             // Status 6: "the client has sent a malformed or invalid item". Logged, since the device only keeps the
             // item to itself and the server would otherwise have no trace of why it never arrived.
@@ -974,7 +974,7 @@ export abstract class SyncCommand implements EasCommandHandler {
             return undefined;
         } catch (err: any) {
             if (!updated) {
-                await this.discardLosingSeal(options);
+                await this.discardLosingSeal(round, options, existing);
             }
             if (err instanceof ApiError && err.code === ApiErrors.INVALID_OBJECT_VERSION) {
                 return this.statusResponseElement("Change", serverId, "7");
@@ -1002,11 +1002,51 @@ export abstract class SyncCommand implements EasCommandHandler {
      * `BaseMailComposeRoute.storeBody()` does: the seal deferred its index entry (`deferIndex`), so a save that fails wrote none, and the
      * entry the winner (another client's save, or restapi's backfill) wrote after its own update is left alone. Best effort: the device
      * is told the save failed either way.
+     *
+     * A restapi older than `deferIndex` (which the peer range still admits, and the plugin host doesn't check) ignores the option: its
+     * seal already wrote or replaced the entry, and returns no `writeIndex()`. That entry stands in for content the draft never got, so
+     * it goes as it did before the entry was deferred: always for an Add, and for a Change when `losingIndexEntryMayGo()` allows it.
      */
-    private async discardLosingSeal(options: DraftWriteOptions | undefined): Promise<void> {
+    private async discardLosingSeal(round: CollectionRound, options: DraftWriteOptions | undefined, existing: any): Promise<void> {
         const sealed: ZeroAccessSealedFields | undefined = options?.sealed;
-        if (sealed) {
-            await this.blobStore?.delete(sealed.bodyBlobKey).catch(() => undefined);
+        if (!sealed) {
+            return;
+        }
+        await this.blobStore?.delete(sealed.bodyBlobKey).catch(() => undefined);
+        if (sealed.writeIndex || (existing && !(await this.losingIndexEntryMayGo(round, existing)))) {
+            return;
+        }
+        await this.zeroAccessWriter!.removeIndexEntry(sealed.indexEntryUid).catch((err: any) => {
+            this.logger?.warn(`SyncCommand: could not remove the zero-access index entry of draft ${existing?.uid ?? "(not created)"} after a failed save: ${err?.message ?? err}`);
+        });
+    }
+
+    /**
+     * Whether the index entry a losing device save's seal wrote itself (a restapi older than `deferIndex`, see `discardLosingSeal()`)
+     * may go after its update failed, judged by what the draft is now. The entry shares its uid with the Sent Items copy's, and
+     * restapi's Sent Items seal keeps an entry that already exists. So once the draft was assembled readable for a send, or filed as
+     * the sealed Sent copy, this save's entry is the only one the sent message will get, and is kept. It goes when the draft is gone,
+     * when a sealed save won (whose next save writes its own), or when zero-access is no longer active for the mailbox. It also goes
+     * when the draft was readable and still has the body this save set out to replace: nothing was assembled or saved since (the save
+     * lost to a write that left the body alone, or was refused before its update), and restapi's backfill writes the entry it seals.
+     * A failed lookup keeps it.
+     */
+    private async losingIndexEntryMayGo(round: CollectionRound, existing: any): Promise<boolean> {
+        try {
+            const current: any = await round.repo.findOne(existing.uid, { ignoreACL: true, skipCache: true });
+            if (!current) {
+                return true;
+            }
+            if (current.zeroAccess) {
+                return typeof current.bodyBlobKey === "string" && current.bodyBlobKey.startsWith(zeroAccessDraftBlobPrefix(existing.mailboxUid));
+            }
+            if (!existing.zeroAccess && current.bodyBlobKey === existing.bodyBlobKey) {
+                return true;
+            }
+            return !(await this.zeroAccessWriter!.target(await round.getFolderMailbox()));
+        } catch (err: any) {
+            this.logger?.warn(`SyncCommand: could not tell whether draft ${existing.uid}'s zero-access index entry outlived a failed save; keeping it: ${err?.message ?? err}`);
+            return false;
         }
     }
 

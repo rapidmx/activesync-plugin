@@ -1316,9 +1316,14 @@ describe("SyncCommand Tests (isolated)", () => {
             const addOf = () => request(element(WbxmlCodePage.AirSync, "Add", [textElement(WbxmlCodePage.AirSync, "ClientId", "client-1"), applicationData()]));
             const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID, mailboxUid: "mbx-1", bodyBlobKey: "za/mbx-1/drafts/old", zeroAccess: { sealed: true } };
             /** A command whose Email saves seal through a `ZeroAccessWriter` (`draftWriteOptions()`), as the real adapter does. */
-            const build = async (repoOverrides: Record<string, any>, blobDelete: any = vi.fn().mockResolvedValue(undefined)) => {
+            const build = async (repoOverrides: Record<string, any>, blobDelete: any = vi.fn().mockResolvedValue(undefined), deferred: boolean = true) => {
                 const writeIndex = vi.fn().mockResolvedValue(undefined);
-                const writer = { sealDraft: vi.fn().mockResolvedValue({ ...sealedBody, writeIndex }), removeIndexEntry: vi.fn(), target: vi.fn() };
+                // `deferred` false: a restapi older than `deferIndex`, whose seal wrote the entry itself and returns no `writeIndex()`.
+                const writer = {
+                    sealDraft: vi.fn().mockResolvedValue(deferred ? { ...sealedBody, writeIndex } : { ...sealedBody }),
+                    removeIndexEntry: vi.fn().mockResolvedValue(undefined),
+                    target: vi.fn(),
+                };
                 const adapter = fakeAdapter({ collectionClass: "Email", fromApplicationData: async (_data, _existing, _mailbox, options) => (await options!.sealDraftBody!(Buffer.from("mime")))! });
                 const repo = fakeRepo(repoOverrides);
                 const harness = await buildCommand("Email", adapter, repo, { folder: { uid: FOLDER_UID, mailboxUid: "mbx-1", type: FolderType.DRAFTS } });
@@ -1399,6 +1404,87 @@ describe("SyncCommand Tests (isolated)", () => {
                 expect(writer.sealDraft.mock.calls[0][2]).toBe(createdUid);
                 expect(writeIndex).toHaveBeenCalledTimes(1);
                 expect(blobStore.delete).not.toHaveBeenCalled();
+            });
+
+            describe("against a restapi older than deferIndex, whose seal wrote the entry itself", () => {
+                const conflict = () => vi.fn().mockRejectedValue(new ApiError(ApiErrors.INVALID_OBJECT_VERSION, 409, "Version conflict"));
+                /** A Change of `before` that loses to whatever the draft has become (`current`, or a lookup that throws): answers the command's writer. */
+                const losing = async (current: any, active: boolean = true, before: any = existing) => {
+                    const findOne = vi.fn().mockResolvedValueOnce(before);
+                    if (current instanceof Error) {
+                        findOne.mockRejectedValueOnce(current);
+                    } else {
+                        findOne.mockResolvedValueOnce(current);
+                    }
+                    const built = await build({ findOne, update: conflict() }, undefined, false);
+                    built.writer.target.mockResolvedValue(active ? { keys: [] } : undefined);
+                    expect(responseStatus(await built.command.handle(buildContext(changeOf()).ctx), "Change")).toBe("7");
+                    expect(built.blobStore.delete).toHaveBeenCalledWith("za/mbx-1/drafts/new");
+                    return built;
+                };
+
+                it("An Add whose create fails removes the entry, for a draft that doesn't exist, and logs a removal that fails.", async () => {
+                    const { command, writer, logger } = await build({ create: vi.fn().mockRejectedValue(new Error("db down")) }, undefined, false);
+                    expect(responseStatus(await command.handle(buildContext(addOf()).ctx), "Add")).toBe("6");
+                    expect(writer.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+
+                    const failing = await build({ create: vi.fn().mockRejectedValue(new Error("db down")) }, undefined, false);
+                    failing.writer.removeIndexEntry.mockRejectedValue(new Error("index down"));
+                    expect(responseStatus(await failing.command.handle(buildContext(addOf()).ctx), "Add")).toBe("6");
+                    expect(failing.logger.warn).toHaveBeenCalledWith(expect.stringContaining("could not remove the zero-access index entry of draft (not created) after a failed save: index down"));
+                    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("could not remove"));
+                });
+
+                it("A losing Change removes the entry when the draft is gone, a sealed save won, or zero-access is off, reading the row back uncached.", async () => {
+                    const gone = await losing(undefined);
+                    expect(gone.writer.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+                    expect(gone.repo.findOne).toHaveBeenLastCalledWith("item-1", { ignoreACL: true, skipCache: true });
+
+                    const sealedWon = await losing({ ...existing, version: 2, bodyBlobKey: "za/mbx-1/drafts/winner" });
+                    expect(sealedWon.writer.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+
+                    const off = await losing({ ...existing, version: 2, zeroAccess: null, bodyBlobKey: "bodies/readable" }, false);
+                    expect(off.writer.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+                });
+
+                it("A losing Change of a still-readable draft removes the entry while the draft keeps the body it had, and keeps it once that body changed.", async () => {
+                    const readable = { ...existing, zeroAccess: null, bodyBlobKey: "bodies/readable" };
+                    // Lost to a write that left the body alone (a flag, a read state): nothing was assembled, so the entry is the losing content's.
+                    const unchanged = await losing({ ...readable, version: 2 }, true, readable);
+                    expect(unchanged.writer.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+                    expect(unchanged.writer.target).not.toHaveBeenCalled();
+
+                    const assembled = await losing({ ...readable, version: 2, bodyBlobKey: "composed/readable" }, true, readable);
+                    expect(assembled.writer.removeIndexEntry).not.toHaveBeenCalled();
+                });
+
+                it("A losing Change keeps the entry once the draft was assembled readable or filed as the sealed Sent copy, and when the lookup fails.", async () => {
+                    const assembled = await losing({ ...existing, version: 2, zeroAccess: null, bodyBlobKey: "composed/readable" });
+                    expect(assembled.writer.removeIndexEntry).not.toHaveBeenCalled();
+
+                    const filed = await losing({ ...existing, version: 2, bodyBlobKey: "za/mbx-1/item-1" });
+                    expect(filed.writer.removeIndexEntry).not.toHaveBeenCalled();
+
+                    const unknown = await losing({ ...existing, version: 2, bodyBlobKey: undefined });
+                    expect(unknown.writer.removeIndexEntry).not.toHaveBeenCalled();
+
+                    const failing = await losing(new Error("lookup down"));
+                    expect(failing.writer.removeIndexEntry).not.toHaveBeenCalled();
+                    expect(failing.logger.warn).toHaveBeenCalledWith(expect.stringContaining("could not tell whether draft item-1's zero-access index entry outlived a failed save; keeping it: lookup down"));
+                });
+
+                it("A winning Change leaves the entry its seal wrote.", async () => {
+                    const { command, writer } = await build(
+                        {
+                            findOne: vi.fn().mockResolvedValueOnce(existing).mockResolvedValueOnce({ ...existing, version: 2, bodyBlobKey: "za/mbx-1/drafts/new" }),
+                            update: vi.fn().mockImplementation(async (obj: any) => ({ ...existing, ...obj, version: 2 })),
+                        },
+                        undefined,
+                        false,
+                    );
+                    expect(findChild(collection((await command.handle(buildContext(changeOf()).ctx))!), "Responses")).toBeUndefined();
+                    expect(writer.removeIndexEntry).not.toHaveBeenCalled();
+                });
             });
         });
 

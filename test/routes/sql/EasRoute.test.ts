@@ -2635,12 +2635,22 @@ describe("Route:EasRouteSQL Tests", () => {
                     await messageRepo.delete({ uid });
                 };
                 /** Runs `run` with `during` called right after each draft body it seals is stored, before the device's save is written: another
-                 * client's save landing in between. Answers the Sync response and the sealed bodies' keys. */
-                const racing = async (during: (messageUid: string) => Promise<void>, run: () => Promise<WbxmlElement>): Promise<{ response: WbxmlElement; keys: string[] }> => {
+                 * client's save landing in between. Answers the Sync response and the sealed bodies' keys. `eager`: sealed as a restapi older
+                 * than `deferIndex` does, which writes the draft's index entry before `sealDraft()` returns, and returns no `writeIndex()`. */
+                const racing = async (
+                    during: (messageUid: string) => Promise<void>,
+                    run: () => Promise<WbxmlElement>,
+                    eager: boolean = false,
+                ): Promise<{ response: WbxmlElement; keys: string[] }> => {
                     const sealDraft = ZeroAccessWriter.prototype.sealDraft;
                     const keys: string[] = [];
                     const spy = vi.spyOn(ZeroAccessWriter.prototype, "sealDraft").mockImplementation(async function (this: ZeroAccessWriter, ...args: any[]) {
-                        const sealed: any = await (sealDraft as any).apply(this, args);
+                        let sealed: any = await (sealDraft as any).apply(this, args);
+                        if (eager) {
+                            const { writeIndex, ...older } = sealed;
+                            await writeIndex();
+                            sealed = older;
+                        }
                         keys.push(sealed.bodyBlobKey);
                         await during(args[2]);
                         return sealed;
@@ -2794,6 +2804,106 @@ describe("Route:EasRouteSQL Tests", () => {
                     }
                     expect((await byUid(messageRepo, uid)).bodyBlobKey).toBe(laterKey);
                     expect((await entryOf(uid)).sealed).toBe("later entry");
+                });
+
+                it("Against a restapi older than deferIndex, whose seal writes the entry itself, removes the entry of a device's draft Change that loses to a sealed save, a delete or a write that left a readable draft's body alone, and of an Add whose create fails, and keeps it once the draft was assembled readable for sending.", async () => {
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const { uid, syncKey } = await sealedDraft(folder);
+                    const first: string = (await entryOf(uid)).sealed;
+
+                    // A winning Change: its seal wrote the entry, and nothing removes it.
+                    const won = await racing(
+                        async () => undefined,
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(uid, [textBody("second body")])])),
+                        true,
+                    );
+                    expect(responseOf(won.response, "Change")).toBeUndefined();
+                    expect((await byUid(messageRepo, uid)).bodyBlobKey).toBe(won.keys[0]);
+                    expect((await entryOf(uid)).sealed).not.toBe(first);
+
+                    // Losing to another sealed save: the entry the seal wrote holds content the draft never got, and the winner's next save writes its own.
+                    const lost = await racing(
+                        async () => await overwrite(uid, { bodyBlobKey: `${zeroAccessDraftBlobPrefix(mailbox.uid)}${uuid.v4()}` }),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(childText(collectionOf(won.response), "SyncKey")!, "Email", folder.uid, [change(uid, [textBody("lost body")])])),
+                        true,
+                    );
+                    expect(childText(responseOf(lost.response, "Change")!, "Status")).toBe("7");
+                    await expect(blobStore().get(lost.keys[0])).rejects.toThrow();
+                    expect(await entryOf(uid)).toBeFalsy();
+
+                    // Assembled readable for sending meanwhile: the entry is all the Sent Items copy will get.
+                    const sending = await sealedDraft(folder);
+                    const assembled = await racing(
+                        async () => await overwrite(sending.uid, { zeroAccess: null, bodyBlobKey: `composed/${uuid.v4()}` }),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(sending.syncKey, "Email", folder.uid, [change(sending.uid, [textBody("phone body")])])),
+                        true,
+                    );
+                    expect(childText(responseOf(assembled.response, "Change")!, "Status")).toBe("7");
+                    await expect(blobStore().get(assembled.keys[0])).rejects.toThrow();
+                    expect(await entryOf(sending.uid)).toBeTruthy();
+
+                    // Still readable (the backfill hasn't sealed it yet), and lost to a write that left its body alone (a flag, a read state):
+                    // nothing was assembled, so the entry, which holds the phone's lost body, goes.
+                    const plain = await sealedDraft(folder);
+                    const readableKey = `bodies/${uuid.v4()}`;
+                    await blobStore().put(readableKey, Buffer.from("Subject: Readable draft\r\n\r\nold body"), { contentType: "message/rfc822" });
+                    await overwrite(plain.uid, { zeroAccess: null, bodyBlobKey: readableKey });
+                    expect(await entryOf(plain.uid)).toBeTruthy();
+                    const flagged = await racing(
+                        async () => await overwrite(plain.uid, {}),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(plain.syncKey, "Email", folder.uid, [change(plain.uid, [textBody("phone body")])])),
+                        true,
+                    );
+                    expect(childText(responseOf(flagged.response, "Change")!, "Status")).toBe("7");
+                    await expect(blobStore().get(flagged.keys[0])).rejects.toThrow();
+                    expect((await byUid(messageRepo, plain.uid)).bodyBlobKey).toBe(readableKey);
+                    expect(await entryOf(plain.uid)).toBeFalsy();
+
+                    // Deleted meanwhile: the entry the seal wrote back for it goes.
+                    const gone = await sealedDraft(folder);
+                    const deleted = await racing(
+                        async () => await removeRow(gone.uid),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(gone.syncKey, "Email", folder.uid, [change(gone.uid, [textBody("phone body")])])),
+                        true,
+                    );
+                    expect(["6", "7", "8"]).toContain(childText(responseOf(deleted.response, "Change")!, "Status"));
+                    await expect(blobStore().get(deleted.keys[0])).rejects.toThrow();
+                    expect(await entryOf(gone.uid)).toBeFalsy();
+
+                    // An Add whose create fails: an entry for a draft that doesn't exist.
+                    let failing: string | undefined;
+                    const create = RepoUtils.prototype.create;
+                    const createSpy = vi.spyOn(RepoUtils.prototype, "create").mockImplementation(async function (this: any, ...args: any[]) {
+                        if (failing && args[0]?.uid === failing) {
+                            throw new Error("database down");
+                        }
+                        return await (create as any).apply(this, args);
+                    });
+                    try {
+                        const added = await racing(
+                            async (messageUid) => {
+                                failing = messageUid;
+                                expect(await entryOf(messageUid)).toBeTruthy();
+                            },
+                            async () =>
+                                await postWbxml(
+                                    "Sync",
+                                    "dev1",
+                                    syncRequestWithCommands(childText(collectionOf(deleted.response), "SyncKey")!, "Email", folder.uid, [
+                                        add("client-9", [textElement(WbxmlCodePage.Email, "Subject", "Lost"), textBody("lost body")]),
+                                    ]),
+                                ),
+                            true,
+                        );
+                        expect(childText(responseOf(added.response, "Add")!, "Status")).toBe("6");
+                        await expect(blobStore().get(added.keys[0])).rejects.toThrow();
+                        expect(await entryOf(failing!)).toBeFalsy();
+                        expect(await byUid(messageRepo, failing!)).toBeFalsy();
+                    } finally {
+                        createSpy.mockRestore();
+                    }
                 });
 
                 it("Keeps the search stamp of a readable message waiting in a zero-access mailbox's Outbox when a device flags it, and clears it otherwise.", async () => {
