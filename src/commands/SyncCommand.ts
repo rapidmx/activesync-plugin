@@ -872,6 +872,7 @@ export abstract class SyncCommand implements EasCommandHandler {
             created = await repo.create(body, { ignoreACL: true });
             // The invitations' claim writes the row again: that later write is the device's own too, or its Add would come back as a Change.
             const stored = (await this.inviteProtectedAdd(repo, created, content)) ?? created;
+            await this.writeDraftIndex(round, created.uid, options?.sealed);
             this.noteWrite(round, stored);
             this.publishWrite(round, "create", stored);
             if (clientId) {
@@ -880,8 +881,8 @@ export abstract class SyncCommand implements EasCommandHandler {
             return this.addResponseElement(clientId, created.uid, "1");
         } catch (err: any) {
             if (!created) {
-                // Nothing else can own the uid of a draft that was never created: what its seal stored goes with it.
-                await this.discardLosingSeal(round, options, undefined);
+                // A draft that was never created: the body its seal stored goes with it.
+                await this.discardLosingSeal(options);
             }
             // Status 6: "the client has sent a malformed or invalid item". Logged, since the device only keeps the
             // item to itself and the server would otherwise have no trace of why it never arrived.
@@ -964,6 +965,7 @@ export abstract class SyncCommand implements EasCommandHandler {
                 patch.retainedBodyBlobKeys = retained;
             }
             updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
+            await this.writeDraftIndex(round, existing.uid, options?.sealed);
             if (patch.zeroAccess) {
                 await this.discardReplacedBody(repo, existing, replacesBody && !held);
             }
@@ -972,7 +974,7 @@ export abstract class SyncCommand implements EasCommandHandler {
             return undefined;
         } catch (err: any) {
             if (!updated) {
-                await this.discardLosingSeal(round, options, existing);
+                await this.discardLosingSeal(options);
             }
             if (err instanceof ApiError && err.code === ApiErrors.INVALID_OBJECT_VERSION) {
                 return this.statusResponseElement("Change", serverId, "7");
@@ -995,46 +997,37 @@ export abstract class SyncCommand implements EasCommandHandler {
     }
 
     /**
-     * Removes what a device's draft save sealed (`draftWriteOptions()`) when the save then failed - a version conflict with a save that
-     * won, or an Add whose create failed: the fresh sealed blob, which nothing names, and the index entry `sealDraft()` replaced, which
-     * would otherwise stand in for content the draft never got. For a Change, the entry is only removed when `losingIndexEntryMayGo()`
-     * allows it. Best effort: the device is told the save failed either way.
+     * Removes the body a device's draft save sealed (`draftWriteOptions()`) when the save then failed - a version conflict with a save
+     * that won, or an Add whose create failed: the fresh sealed blob, which nothing names. Only the blob, as the server's
+     * `BaseMailComposeRoute.storeBody()` does: the seal deferred its index entry (`deferIndex`), so a save that fails wrote none, and the
+     * entry the winner (another client's save, or restapi's backfill) wrote after its own update is left alone. Best effort: the device
+     * is told the save failed either way.
      */
-    private async discardLosingSeal(round: CollectionRound, options: DraftWriteOptions | undefined, existing: any): Promise<void> {
+    private async discardLosingSeal(options: DraftWriteOptions | undefined): Promise<void> {
         const sealed: ZeroAccessSealedFields | undefined = options?.sealed;
-        if (!sealed) {
-            return;
+        if (sealed) {
+            await this.blobStore?.delete(sealed.bodyBlobKey).catch(() => undefined);
         }
-        await this.blobStore?.delete(sealed.bodyBlobKey).catch(() => undefined);
-        if (existing && !(await this.losingIndexEntryMayGo(round, existing))) {
-            return;
-        }
-        await this.zeroAccessWriter!.removeIndexEntry(sealed.indexEntryUid).catch((err: any) => {
-            this.logger?.warn(`SyncCommand: could not remove the zero-access index entry of draft ${existing?.uid ?? "(not created)"} after a failed save: ${err?.message ?? err}`);
-        });
     }
 
     /**
-     * Whether the index entry a device's sealed draft save wrote may go after its update failed, judged by what the draft is now - as
-     * the server's `BaseMailComposeRoute.losingIndexEntryMayGo()` does. The entry shares its uid with the Sent Items copy's, and
-     * restapi's Sent Items seal keeps an entry that already exists. So once the draft was assembled readable for a send, or filed as
-     * the sealed Sent copy, this save's entry is the only one the sent message will get, and is kept. It goes when the draft is gone,
-     * when a sealed save won (whose next save writes its own), or when zero-access is no longer active for the mailbox. A failed
-     * lookup keeps it.
+     * Writes the index entry of a draft whose sealed device save (`draftWriteOptions()`) just won its update or create - the seal's
+     * deferred `writeIndex()`, replacing the entry the draft had - only while the row still points at this save's blob, as the server's
+     * `BaseMailComposeRoute.writeDraftIndex()` and restapi's `ZeroAccessBackfillJob` do: a later save, the backfill or a send that has
+     * moved the draft on since writes or drops the entry itself, and this one must not stand in for it. Best effort (logged): the save
+     * is stored, and a draft left with an older entry gets a fresh one at its next save.
      */
-    private async losingIndexEntryMayGo(round: CollectionRound, existing: any): Promise<boolean> {
+    private async writeDraftIndex(round: CollectionRound, uid: string, sealed: ZeroAccessSealedFields | undefined): Promise<void> {
+        if (!sealed) {
+            return;
+        }
         try {
-            const current: any = await round.repo.findOne(existing.uid, { ignoreACL: true });
-            if (!current) {
-                return true;
+            const current: any = await round.repo.findOne(uid, { ignoreACL: true, includeDeleted: true, skipCache: true });
+            if (current?.bodyBlobKey === sealed.bodyBlobKey) {
+                await sealed.writeIndex?.();
             }
-            if (current.zeroAccess) {
-                return typeof current.bodyBlobKey === "string" && current.bodyBlobKey.startsWith(zeroAccessDraftBlobPrefix(existing.mailboxUid));
-            }
-            return !(await this.zeroAccessWriter!.target(await round.getFolderMailbox()));
         } catch (err: any) {
-            this.logger?.warn(`SyncCommand: could not tell whether draft ${existing.uid}'s zero-access index entry outlived a failed save; keeping it: ${err?.message ?? err}`);
-            return false;
+            this.logger?.warn(`SyncCommand: could not write the zero-access index entry of draft ${uid} after a sealed save: ${err?.message ?? err}`);
         }
     }
 
@@ -1100,8 +1093,9 @@ export abstract class SyncCommand implements EasCommandHandler {
         }
         const options: DraftWriteOptions = {
             sealDraftBody: async (mime: Buffer) => {
-                const sealed = await writer.sealDraft(await round.getFolderMailbox(), mime, uid, new Date());
-                // Kept so a save that then fails can remove what this stored (`discardLosingSeal()`).
+                // The index entry waits for the save's own write to win (`writeDraftIndex()`), so a save that loses never touches it.
+                const sealed = await writer.sealDraft(await round.getFolderMailbox(), mime, uid, new Date(), { deferIndex: true });
+                // Kept to write that entry, or for a save that then fails to remove the body this stored (`discardLosingSeal()`).
                 options.sealed = sealed;
                 // Re-indexed as metadata only: a search document built while the draft was readable holds its subject and body.
                 return (

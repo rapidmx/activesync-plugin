@@ -12,6 +12,7 @@
 import config from "../config.js";
 import { ObjectFactory } from "@rapidrest/service-core";
 import { Logger } from "@rapidrest/core";
+import { zeroAccessBlobKey } from "@rapidmx/restapi";
 import { FolderMongo, MessageMongo } from "@rapidmx/restapi/mongo";
 import { SendMailCommandMongo } from "../../src/commands/mongo/SendMailCommandMongo.js";
 import { SmartForwardCommandMongo } from "../../src/commands/mongo/SmartForwardCommandMongo.js";
@@ -445,6 +446,9 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
 
                 await expect(command.handle(ctx({ SaveInSentItems: "" }))).rejects.toThrow("policy lookup failed");
 
+                // The copy's uid is fresh to this send, so its blob key is named as one: a seal that fails removes the blob it stored.
+                const [mailbox, , uid, , options] = command.zeroAccessWriter.sealRaw.mock.calls[0];
+                expect(options).toEqual({ blobKey: zeroAccessBlobKey(mailbox.uid, uid) });
                 expect(deleted(command)).toEqual([expect.stringMatching(/^sanitized\//)]);
                 expect(command.zeroAccessWriter.removeIndexEntry).not.toHaveBeenCalled();
                 expect(messageRepo.create).not.toHaveBeenCalled();

@@ -2718,6 +2718,12 @@ describe("Route:EasRouteMongo Tests", () => {
                     await (objectFactory.getInstance(ConnectionManager)?.connections.get("mongo") as any)
                         .getMongoRepository("ZeroAccessIndexEntryMongo")
                         .findOne({ uid: zeroAccessIndexEntryUid(messageUid) });
+                /** Another filing's write of message `messageUid`'s index entry (a winning save's, or restapi's backfill's): marked `sealed`. */
+                const markEntry = async (messageUid: string, sealed: string): Promise<void> => {
+                    await (objectFactory.getInstance(ConnectionManager)?.connections.get("mongo") as any)
+                        .getMongoRepository("ZeroAccessIndexEntryMongo")
+                        .updateOne({ uid: zeroAccessIndexEntryUid(messageUid) }, { $set: { sealed } });
+                };
                 /** Another client's save of message `uid`: `fields` written with a new version. */
                 const overwrite = async (uid: string, fields: Record<string, unknown>): Promise<void> => {
                     const current: any = await byUid(messageRepo, uid);
@@ -2758,7 +2764,7 @@ describe("Route:EasRouteMongo Tests", () => {
                     return { uid, syncKey: childText(collectionOf(added), "SyncKey")! };
                 };
 
-                it("Removes the sealed body and index entry of a device's draft Change that loses its version check to another sealed save.", async () => {
+                it("Removes only the sealed body of a device's draft Change that loses its version check to another sealed save, leaving the entry the winner wrote after its update.", async () => {
                     const canary = `CANARY-${uuid.v4()}`;
                     const mailbox = await protect({ mail: true });
                     await provisionDevice("dev1");
@@ -2766,15 +2772,19 @@ describe("Route:EasRouteMongo Tests", () => {
                     const { uid, syncKey } = await sealedDraft(folder);
                     const winnerKey = `${zeroAccessDraftBlobPrefix(mailbox.uid)}${uuid.v4()}`;
 
+                    // The winner (another client's sealed save, or restapi's backfill) writes its entry once its update has won.
                     const { response, keys } = await racing(
-                        async () => await overwrite(uid, { bodyBlobKey: winnerKey }),
+                        async () => {
+                            await overwrite(uid, { bodyBlobKey: winnerKey });
+                            await markEntry(uid, "winner's entry");
+                        },
                         async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(uid, [textBody(`${canary} phone`)])])),
                     );
 
                     expect(childText(responseOf(response, "Change")!, "Status")).toBe("7");
                     expect(keys).toHaveLength(1);
                     await expect(blobStore().get(keys[0])).rejects.toThrow();
-                    expect(await entryOf(uid)).toBeFalsy();
+                    expect((await entryOf(uid)).sealed).toBe("winner's entry");
                     expect((await byUid(messageRepo, uid)).bodyBlobKey).toBe(winnerKey);
                 });
 
@@ -2794,11 +2804,12 @@ describe("Route:EasRouteMongo Tests", () => {
                     expect(await entryOf(uid)).toBeTruthy();
                 });
 
-                it("Removes the sealed body and index entry of a device's draft Change whose draft is deleted meanwhile, and of an Add whose create fails.", async () => {
+                it("Removes only the sealed body of a device's draft Change whose draft is deleted meanwhile, and of an Add whose create fails: neither writes an index entry.", async () => {
                     const mailbox = await protect({ mail: true });
                     await provisionDevice("dev1");
                     const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
                     const { uid, syncKey } = await sealedDraft(folder);
+                    const before: string = (await entryOf(uid)).sealed;
 
                     const deleted = await racing(
                         async () => await removeRow(uid),
@@ -2806,7 +2817,8 @@ describe("Route:EasRouteMongo Tests", () => {
                     );
                     expect(["6", "7", "8"]).toContain(childText(responseOf(deleted.response, "Change")!, "Status"));
                     await expect(blobStore().get(deleted.keys[0])).rejects.toThrow();
-                    expect(await entryOf(uid)).toBeFalsy();
+                    // Left as it was: what removes a deleted draft's entry is the delete, not a save that lost to it.
+                    expect((await entryOf(uid)).sealed).toBe(before);
 
                     let failing: string | undefined;
                     const create = RepoUtils.prototype.create;
@@ -2838,6 +2850,48 @@ describe("Route:EasRouteMongo Tests", () => {
                     } finally {
                         createSpy.mockRestore();
                     }
+                });
+
+                it("Writes a winning device Change's index entry after its update, and leaves it to a save that moved the draft on since.", async () => {
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const { uid, syncKey } = await sealedDraft(folder);
+                    const first: string = (await entryOf(uid)).sealed;
+
+                    const won = await racing(
+                        // Not written yet when the device's seal returns: it waits for the update to win.
+                        async () => expect((await entryOf(uid)).sealed).toBe(first),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(uid, [textBody("second body")])])),
+                    );
+                    expect(responseOf(won.response, "Change")).toBeUndefined();
+                    expect((await byUid(messageRepo, uid)).bodyBlobKey).toBe(won.keys[0]);
+                    const second: string = (await entryOf(uid)).sealed;
+                    expect(second).toBeTruthy();
+                    expect(second).not.toBe(first);
+
+                    // Another save (or restapi's backfill) moves the draft on, and writes its own entry, right after the device's update won.
+                    const laterKey = `${zeroAccessDraftBlobPrefix(mailbox.uid)}${uuid.v4()}`;
+                    const update = RepoUtils.prototype.update;
+                    const updateSpy = vi.spyOn(RepoUtils.prototype, "update").mockImplementation(async function (this: any, ...args: any[]) {
+                        const result: any = await (update as any).apply(this, args);
+                        if (args[0]?.uid === uid) {
+                            await overwrite(uid, { bodyBlobKey: laterKey });
+                            await markEntry(uid, "later entry");
+                        }
+                        return result;
+                    });
+                    try {
+                        const overtaken = await racing(
+                            async () => undefined,
+                            async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(childText(collectionOf(won.response), "SyncKey")!, "Email", folder.uid, [change(uid, [textBody("third body")])])),
+                        );
+                        expect(responseOf(overtaken.response, "Change")).toBeUndefined();
+                    } finally {
+                        updateSpy.mockRestore();
+                    }
+                    expect((await byUid(messageRepo, uid)).bodyBlobKey).toBe(laterKey);
+                    expect((await entryOf(uid)).sealed).toBe("later entry");
                 });
 
                 it("Keeps the search stamp of a readable message waiting in a zero-access mailbox's Outbox when a device flags it, and clears it otherwise.", async () => {
