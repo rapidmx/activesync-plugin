@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-26
+
+### Changed
+- Explain, instead of sending an empty body, a message its sender encrypted end to end (S/MIME or OpenPGP) to a device that asks for text or HTML, still serving its MIME verbatim for Type 4
+- Record each ActiveSync device that syncs a mailbox, and the data types it syncs, on the mailbox for restapi's zero-access defaults and warnings
+- Seal calendar, contact and task changes a device sends when zero-access covers their type, ignoring placeholders it sends back unchanged
+- Import the zero-access record sealer with the rest of restapi, and drop unneeded assertions in the device sealing tests
+- Send the invitations of a meeting a device adds to a protected calendar at once, from the plaintext the device sent
+- Read and parse a Sync page's message blobs for bodies and meeting requests a few at a time instead of all at once
+- Refuse a device's addition to a protected contact's sealed phones, addresses or categories, which it was shown empty, rather than replace the hidden list, and keep a contact's emails past the third across a device edit
+- Build SyncCommand's MeetingInviteSender unnamed, so it never shares restapi's job's or route's sender through the object factory
+- Send a readable draft a device's Change seals back to the search index, so its readable search document is rebuilt as metadata only
+- Clear a message's search stamp when a device's Change rewrites its subject, recipients, flags or body, so its search document is rebuilt
+- Keep the search stamp of a readable message waiting in a zero-access mailbox's Outbox when a device's Change touches its flags or another indexed field, so SearchIndexJob never indexes its plaintext before the sealed Sent Items copy is filed
+- Note that restapi's metadata-only indexing of readable zero-access mail and its Outbox re-index on send closed the search stamp gap left there
+- Keep the draft body a device's sealing Change replaces while an open Matter holds the mailbox, recording a bodies/ key in retainedBodyBlobKeys by the same versioned update, as the server's compose route does
+- Expect a device's held sealing Change of a sealed draft to record the replaced za/<mailbox>/drafts/ body in retainedBodyBlobKeys, as restapi now accepts it
+- Test that a SendMail whose sealed Sent Items copy fails writing its index entry leaves no sealed blob, readable sanitized HTML or index entry behind
+- Decide whether a device's Change keeps the draft body it replaces for a legal hold, and refuse one at the retention bound, before its new body is sealed, so a refused save leaves the draft's zero-access index entry as it was
+- Write a device's sealed draft save's index entry only after its version-checked update or create wins, and only while the row still names its blob, so a losing Change deletes just its fresh blob and never removes or undercuts the entry the server's compose save or restapi's backfill wrote
+- Name a Sent Items copy's fresh za/<mailbox>/<uid> key as fresh to its sealRaw() call, so a seal that fails writing its index entry removes the sealed blob it stored rather than leave it with no row naming it
+- Force the fixed versions of the dependencies the audit flags through resolutions, and ignore only node-forge's unfixed advisory 1240912 until acme-client or node-forge ships a fix
+- Pass restapi's freshMessageUid to the Sent Items copy's sealRaw() in place of naming its fresh za/<mailbox>/<uid> key as blobKey, so a seal that fails after storing the blob removes it under the option made for a uid minted for one filing
+- Describe this release's changes in the release notes
+- Build against @rapidmx/restapi ^0.35.0
+
+### Fixed
+- Fixed an occurrence edit (InstanceId Change) on a protected calendar storing its new title and location readable, by sealing the occurrence's patch like every other device write
+- Fixed a device's empty element for a sealed field it was shown none of (a location, a contact's or task's notes) deleting the sealed value
+- Fixed the Sent Items copy of SendMail/SmartReply/SmartForward being stored readable for a zero-access mailbox, sealing it with restapi's ZeroAccessWriter
+- Fixed drafts a device adds or changes being stored readable for a zero-access mailbox, sealing them on save and removing the readable body a sealed change replaces
+- Fixed a sealed draft saved readable again keeping its zeroAccess marker, and refuse a subject-only change of a sealed message, which the server can't rebuild
+- Fixed a new device being recorded with no synced data types for up to six hours
+- Fixed Sync listing one attachment per message, by reading every Attachment row of a page in keyset pages instead of capping the lookup at the number of messages
+- Fixed InstanceId edits, deletes and meeting responses on a series with more than 50 overrides duplicating an override or answering the wrong row, by reading every row of the series
+- Fixed a meeting a device adds to a protected calendar coming back to it as a Change with placeholders, by noting the invitations' claim as the device's own write
+- Fixed device Changes field-sealing an event made from a zero-access invitation, by dropping the placeholders it sends back and refusing a new title or location
+
+### Removed
+- Removed the relay scan's sanitized HTML when no readable Sent Items copy names it
+- Removed the sealed body a device's draft Change or Add stored when its write then fails, and the zero-access index entry it replaced unless the draft has since been assembled for sending or filed as the sealed Sent Items copy, so a losing save's entry never stands in for the draft
+- Removed the body blob, a sealed copy's index entry and the relay scan's readable sanitized HTML when a SendMail, SmartReply or SmartForward Sent Items copy fails to be sealed or saved
+- Removed the index entry a device's losing draft save wrote when the installed restapi ignored deferIndex and its seal wrote the entry itself (no writeIndex), always for a failed Add and for a lost Change while the draft is gone, a sealed save won, zero-access is off, or a readable draft still has the body the save set out to replace
+
 ## [1.1.0] - 2026-10-24
 
 ### Changed
@@ -423,7 +467,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.18...v1.0.0
 [1.0.0-beta.18]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.17...v1.0.0-beta.18

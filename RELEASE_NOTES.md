@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.2.0
+
 ### Added
 
 - **Zero-access encryption for calendars, contacts and tasks** (`@rapidmx/restapi` 0.35). When a mailbox's zero-access encryption covers
