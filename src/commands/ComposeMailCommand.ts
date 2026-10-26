@@ -25,7 +25,6 @@ import {
     scanAndRelay,
     type ZeroAccessSealedFields,
     type ZeroAccessWriter,
-    zeroAccessBlobKey,
 } from "@rapidmx/restapi";
 import { WbxmlCodePage } from "../codec/WbxmlCodePages.js";
 import { childText, element, findChild, textElement, type WbxmlElement } from "../codec/WbxmlElement.js";
@@ -323,11 +322,12 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
                 const stored: Buffer =
                     relayed.raw !== stripped ? prependHeaders(composed, [{ name: "Message-ID", value: `<${relayed.messageId}>` }]) : composed;
                 // Sealed for a zero-access mailbox, as restapi seals its own Sent Items copies - not one the device encrypted end to end,
-                // which is ciphertext already. The copy's uid is fresh to this request, so no other filing can share its blob key: named
-                // as such (`blobKey`), a seal that fails after storing the blob removes it rather than leave it for a retry that never comes.
+                // which is ciphertext already. The copy's uid is fresh to this request and never retried under, so no other filing can share
+                // its za/<mailbox>/<uid> key: named as such (`freshMessageUid`), a seal that fails after storing the blob removes it rather
+                // than leave it for a retry that never comes.
                 sealed = relayed.encrypted
                     ? undefined
-                    : await this.zeroAccessWriter?.sealRaw(mailbox, stored, uid, new Date(), { blobKey: zeroAccessBlobKey(mailbox.uid, uid) });
+                    : await this.zeroAccessWriter?.sealRaw(mailbox, stored, uid, new Date(), { freshMessageUid: true });
                 const bodyBlobKey: string = sealed ? sealed.bodyBlobKey : `bodies/${crypto.randomUUID()}`;
                 let sentFolder: any;
                 let sentCopy: any;

@@ -1514,6 +1514,14 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
 - **A SendMail/SmartReply/SmartForward Sent Items copy whose seal fails writing its index entry leaves no sealed blob again.** Found because the round-5 end-to-end test ("SendMail removes the sealed body and the relay's readable sanitized HTML when sealing the Sent Items copy fails writing its index entry", both backends) failed at HEAD against the installed restapi: restapi 69e47fc (#601/#607) narrowed `ZeroAccessWriter.seal()`'s failure cleanup to a blob under a key the caller names as fresh (`ZeroAccessSealOptions.blobKey`), never the message's own `za/<mailbox>/<uid>`. `ComposeMailCommand` called `sealRaw()` with no options, so the copy's sealed blob (ciphertext) was left with no row. The copy's uid is a fresh `crypto.randomUUID()` per request, so no other filing can share its key: it now passes `{ blobKey: zeroAccessBlobKey(mailbox.uid, uid) }` (the default key, named as fresh). The existing end-to-end test passes again; `ComposeMailCommand.test.ts` checks the option. mapi's `RopSubmitMessageHandler` had the same gap and is fixed the same way.
 - Full run green: 40 files, 1146 tests, 100% lines/functions/statements, 97.91% branches.
 
+## 2026-10-26: Review round 7 fixes (restapi 701 follow-up)
+- **Sent Items copy's sealed blob on a failed seal (restapi 701).** The SendMail/SmartReply/SmartForward Sent Items copy mints a fresh `crypto.randomUUID()` uid and never
+  retries under it. Round 6's interim fix named its key as fresh with `{ blobKey: zeroAccessBlobKey(mailbox.uid, uid) }`; it now passes
+  restapi 979678f's `{ freshMessageUid: true }` instead (`src/commands/ComposeMailCommand.ts` `handle()`), the option made for exactly this, so restapi's `seal()` removes
+  the `za/<mbx>/<uid>` blob it stored when the index-entry create (or summary sealing) fails. Same effect, intent named. Reproduced
+  first: with no option (the round-6 shape the finding traced), `EasRoute` (both backends) "SendMail removes the sealed body ... fails writing its index entry" fails with the za/ key left; it passes with the option.
+  `ComposeMailCommand.test.ts` asserts the option. Needs restapi with 979678f: CI against the published 0.34.0 fails to compile until the next restapi release.
+
 ## 2026-10-26: Dependency audit
 - **Why.** CI's `validate` job (`validate.sh`: `yarn npm audit -R --severity high --no-deprecations`, production then development) failed on high/critical advisories in transitive dependencies.
 - **Fixed by `resolutions`** in `package.json` (descriptor-scoped, same style as the existing ones; drop each once the parent's own range picks up the fixed version): follow-redirects ^1.16.2, nodemailer 10.0.1 (mailparser) ^10.2.1 and the direct dependency ^10.1.4, source-map-js ^1.2.2, handlebars ^4.7.10, brace-expansion ^1.1.21/^5.0.12, tar ^7.5.22, undici ^6.29.1; `vite` ^8.3.5 (dev). Mirrors restapi's set.
