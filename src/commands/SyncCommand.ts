@@ -37,6 +37,8 @@ import {
     type ZeroAccessWriter,
     type ZeroAccessSealedFields,
     zeroAccessDraftBlobPrefix,
+    withRetainedBodyBlobKey,
+    type Matter,
     MeetingInviteSender,
     protectedInvitationsPending,
     type InvitationContent,
@@ -73,6 +75,13 @@ type DraftWriteOptions = SyncWriteOptions & { sealed?: ZeroAccessSealedFields };
 /** The fields of an event made from a zero-access invitation that its `sealedContent` holds, sealed whole (restapi `specs/search.md` §4). */
 const SEALED_CONTENT_FIELDS: readonly string[] = ["title", "location", "description", "descriptionHtml"];
 const { Config, Init, Inject, Logger } = ObjectDecorators;
+
+/** Whether `message`'s body is one a draft save stored - a `bodies/` blob, or a sealed `za/<mailbox>/drafts/` one - and so one a save
+ * that replaces it may delete, or must keep for a legal hold (server `BaseMailComposeRoute.storeBody()`'s `replacesComposedBody`). */
+function replacesComposedBody(message: { bodyBlobKey?: unknown; mailboxUid?: string }): boolean {
+    const key: unknown = message.bodyBlobKey;
+    return typeof key === "string" && (key.startsWith("bodies/") || (!!message.mailboxUid && key.startsWith(zeroAccessDraftBlobPrefix(message.mailboxUid))));
+}
 
 /** Default most item changes reported per collection per `Sync` round. */
 const DEFAULT_WINDOW_SIZE = 100;
@@ -224,6 +233,9 @@ export abstract class SyncCommand implements EasCommandHandler {
     /** The backend's `ZeroAccessIndexEntry`: with `encryptionPolicyClass`, a draft a device saves is sealed when zero-access covers the
      * mailbox's mail (restapi `ZeroAccessWriter`). Optional: without it drafts are stored readable. */
     protected zeroAccessIndexEntryClass?: any;
+    /** The backend's `Matter`, for the legal hold a draft body a device's Change seals is checked against (`isHeldForBodyReplacement()`).
+     * Optional: without it every replaced body is kept, as a failed hold lookup keeps it. */
+    protected matterClass?: any;
     private recordSealer?: ZeroAccessRecordSealer;
     private zeroAccessWriter?: ZeroAccessWriter;
     /** Sends the invitations of a meeting a device creates in a protected calendar (`inviteProtectedAdd()`). Built on first use. */
@@ -273,6 +285,7 @@ export abstract class SyncCommand implements EasCommandHandler {
     private collectionChunkRepo?: RepoUtils<any>;
     private auditLogRepo?: RepoUtils<any>;
     private auditLogUtils?: AuditLogUtils;
+    private matterRepo?: RepoUtils<Matter>;
 
     @Init
     protected async initialize(): Promise<void> {
@@ -309,6 +322,9 @@ export abstract class SyncCommand implements EasCommandHandler {
         }
         if (!this.auditLogUtils && this.auditLogRepo) {
             this.auditLogUtils = await this._objectFactory.newInstance(AuditLogUtils, { name: this.auditLogClass.name, args: [this.auditLogRepo] });
+        }
+        if (!this.matterRepo && this.matterClass) {
+            this.matterRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.matterClass.name, args: [this.matterClass] });
         }
         if (!this.recordSealer && this.encryptionPolicyClass) {
             this.recordSealer = await newZeroAccessRecordSealer(this._objectFactory, this.encryptionPolicyClass);
@@ -931,9 +947,16 @@ export abstract class SyncCommand implements EasCommandHandler {
                 Object.assign(patch, SEARCH_REINDEX);
             }
             await this.sealDeviceWrite(round, patch, existing);
+            // A sealing Change replaces the draft's body. Under a legal hold the replaced one is kept, and recorded by this same
+            // version-checked update (server `BaseMailComposeRoute.storeBody()`); a draft already retaining the most it may is refused.
+            const replacesBody: boolean = !!patch.zeroAccess && replacesComposedBody(existing);
+            const held: boolean = replacesBody && (await this.isHeldForBodyReplacement(existing.mailboxUid));
+            if (held) {
+                patch.retainedBodyBlobKeys = withRetainedBodyBlobKey(existing, existing.bodyBlobKey);
+            }
             updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
             if (patch.zeroAccess) {
-                await this.discardReplacedBody(repo, existing);
+                await this.discardReplacedBody(repo, existing, replacesBody && !held);
             }
             this.noteWrite(round, updated);
             this.publishWrite(round, "update", updated);
@@ -1087,13 +1110,62 @@ export abstract class SyncCommand implements EasCommandHandler {
         return options;
     }
 
-    /** Removes the body (and sanitized HTML) a draft sealed by a device's Change no longer points at - readable, when the draft was saved
-     * before zero-access covered it - unless another message still names it. Best effort: the draft is already saved. */
-    private async discardReplacedBody(repo: RepoUtils<any>, previous: any): Promise<void> {
+    /** Removes the sanitized HTML a draft sealed by a device's Change no longer points at, and with `body` its replaced body - readable,
+     * when the draft was saved before zero-access covered it - unless another message still names it. Best effort: the draft is
+     * already saved. */
+    private async discardReplacedBody(repo: RepoUtils<any>, previous: any, body: boolean): Promise<void> {
         try {
-            await deleteBlobsIfUnreferenced(this.blobStore!, messageBlobReferenceSources({ messageRepo: repo }), [previous.bodyBlobKey, previous.sanitizedHtmlBlobKey]);
+            await deleteBlobsIfUnreferenced(this.blobStore!, messageBlobReferenceSources({ messageRepo: repo }), [
+                body ? previous.bodyBlobKey : undefined,
+                previous.sanitizedHtmlBlobKey,
+            ]);
         } catch (err: any) {
             this.logger?.warn(`SyncCommand: could not remove the replaced body of sealed draft ${previous.uid}: ${err?.message ?? err}`);
+        }
+    }
+
+    /**
+     * Whether a draft body a device's Change replaces must be kept for a legal hold on `mailboxUid`, as the server's compose route
+     * decides it (`BaseMailComposeRoute.isHeldForBodyReplacement()`). A failing lookup counts as held: the body is then kept and
+     * recorded, which restapi's `RetentionEnforcementJob` undoes once it finds no hold, whereas deleting it could lose discoverable
+     * content. Deliberately not cached, so a hold placed on the mailbox applies to the very next save.
+     */
+    private async isHeldForBodyReplacement(mailboxUid: string): Promise<boolean> {
+        try {
+            return await this.hasActiveLegalHold(mailboxUid);
+        } catch (err: any) {
+            this.logger?.warn(`SyncCommand: legal hold lookup for mailbox ${mailboxUid} failed; keeping the replaced draft body: ${err?.message ?? err}`);
+            return true;
+        }
+    }
+
+    /**
+     * `true` when an open `Matter` names `mailboxUid` as a custodian, whatever its date range - the server's `hasActiveLegalHold()`.
+     * Every `Matter` is read, keyset-paged on `uid`; a cursor that doesn't advance counts as held.
+     */
+    private async hasActiveLegalHold(mailboxUid: string): Promise<boolean> {
+        if (!this.matterRepo) {
+            throw new Error("No Matter model to look legal holds up in.");
+        }
+        const limit = 500;
+        let after: string | undefined;
+        for (;;) {
+            const query: Record<string, unknown> = { sort: { uid: "ASC" }, limit };
+            if (after !== undefined) {
+                query.uid = `gt(${after})`;
+            }
+            const batch: Matter[] = await this.matterRepo.find(query, { ignoreACL: true, limit, skipCache: true });
+            if (batch.some((matter) => !matter.closedAt && (matter.custodianMailboxUids ?? []).includes(mailboxUid))) {
+                return true;
+            }
+            if (batch.length < limit) {
+                return false;
+            }
+            const last: string = batch[batch.length - 1].uid;
+            if (after !== undefined && !(last > after)) {
+                return true;
+            }
+            after = last;
         }
     }
 

@@ -10,7 +10,7 @@
 import config from "../config.js";
 import { ApiError, Logger } from "@rapidrest/core";
 import { ApiErrors, ObjectFactory } from "@rapidrest/service-core";
-import { AuditLogUtils, FolderType } from "@rapidmx/restapi";
+import { AuditLogUtils, FolderType, MAX_RETAINED_BODY_BLOB_KEYS } from "@rapidmx/restapi";
 import { MAX_SYNC_COLLECTIONS, MAX_SYNC_COMMANDS_PER_COLLECTION } from "../../src/commands/SyncCommand.js";
 import { SyncCommandMongo } from "../../src/commands/mongo/SyncCommandMongo.js";
 import { element, findChild, findChildren, childText, textElement, type WbxmlElement } from "../../src/codec/WbxmlElement.js";
@@ -136,6 +136,8 @@ async function buildCommand(
     (command as any).reconcileLimit = 0;
     (command as any).windowSize = 100;
     (command as any).logger = logger;
+    // No legal hold by default.
+    (command as any).matterRepo = { find: vi.fn().mockResolvedValue([]) };
     // Every permission granted by default.
     (command as any).aclUtils = options.aclUtils ?? { hasPermission: vi.fn().mockResolvedValue(true) };
     return { command, stateRepo, folderRepo, chunkRepo, logger, notificationUtils };
@@ -1111,6 +1113,122 @@ describe("SyncCommand Tests (isolated)", () => {
             expect(repo.update).toHaveBeenCalledWith(expect.objectContaining(sealed), expect.anything(), expect.anything());
             expect((command as any).blobStore.delete).not.toHaveBeenCalled();
             expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/could not remove the replaced body of sealed draft item-1/));
+        });
+
+        describe("Change: a sealed draft's replaced body under a legal hold", () => {
+            const changeRequest = () =>
+                syncRequest("Email", [
+                    element(WbxmlCodePage.AirSync, "Change", [textElement(WbxmlCodePage.AirSync, "ServerId", "item-1"), element(WbxmlCodePage.AirSync, "ApplicationData", [])]),
+                ]);
+            const sealed = { bodyBlobKey: "za/mbx-1/drafts/new", subject: "[...]", zeroAccess: { sealed: true } };
+            const holding = () => ({ find: vi.fn().mockResolvedValue([{ uid: "m-1", custodianMailboxUids: ["mbx-1"] }]) });
+            /** A command whose Change seals draft `existing` (whose bodies nothing else references), with `matterRepo` to look holds up in. */
+            const build = async (existing: any, matterRepo: any) => {
+                const repo = fakeRepo({
+                    findOne: vi.fn().mockResolvedValue(existing),
+                    update: vi.fn().mockImplementation(async (obj: any) => ({ ...existing, ...obj, version: 2 })),
+                    count: vi.fn().mockResolvedValue(0),
+                });
+                const harness = await buildCommand("Email", fakeAdapter({ collectionClass: "Email", fromApplicationData: () => ({ ...sealed }) }), repo);
+                const blobStore = { delete: vi.fn().mockResolvedValue(undefined) };
+                (harness.command as any).blobStore = blobStore;
+                (harness.command as any).matterRepo = matterRepo;
+                return { ...harness, repo, blobStore };
+            };
+            const draft = (bodyBlobKey: string, extra: Record<string, unknown> = {}) => ({
+                uid: "item-1",
+                version: 1,
+                folderUid: FOLDER_UID,
+                mailboxUid: "mbx-1",
+                bodyBlobKey,
+                sanitizedHtmlBlobKey: "sanitized/old",
+                ...extra,
+            });
+
+            it("Keeps a readable replaced body and records it in retainedBodyBlobKeys by the same update, still removing the sanitized HTML.", async () => {
+                const matters = holding();
+                const { command, repo, blobStore } = await build(draft("bodies/old", { retainedBodyBlobKeys: ["bodies/older"] }), matters);
+
+                const response = await command.handle(buildContext(changeRequest()).ctx);
+
+                expect(findChild(collection(response!), "Responses")).toBeUndefined();
+                expect(repo.update).toHaveBeenCalledWith(
+                    expect.objectContaining({ bodyBlobKey: sealed.bodyBlobKey, retainedBodyBlobKeys: ["bodies/older", "bodies/old"] }),
+                    expect.anything(),
+                    expect.anything(),
+                );
+                expect(blobStore.delete).toHaveBeenCalledWith("sanitized/old");
+                expect(blobStore.delete).not.toHaveBeenCalledWith("bodies/old");
+                // Read uncached, so a hold placed a moment ago applies.
+                expect(matters.find).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ skipCache: true }));
+            });
+
+            it("Keeps an earlier sealed draft body under a hold without recording it, as the server does.", async () => {
+                const { command, repo, blobStore } = await build(draft("za/mbx-1/drafts/old"), holding());
+
+                await command.handle(buildContext(changeRequest()).ctx);
+
+                expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual([]);
+                expect(blobStore.delete).not.toHaveBeenCalledWith("za/mbx-1/drafts/old");
+            });
+
+            it("Deletes the replaced body when no open Matter holds the mailbox, paging past a full page of matters.", async () => {
+                const page = Array.from({ length: 500 }, (_, i) => ({ uid: `m-${String(i).padStart(4, "0")}`, custodianMailboxUids: ["mbx-1"], closedAt: new Date() }));
+                const matters = { find: vi.fn().mockResolvedValueOnce(page).mockResolvedValueOnce([{ uid: "z-1", custodianMailboxUids: ["other"] }]) };
+                const { command, repo, blobStore } = await build(draft("za/mbx-1/drafts/old"), matters);
+
+                await command.handle(buildContext(changeRequest()).ctx);
+
+                expect(matters.find).toHaveBeenCalledTimes(2);
+                expect(matters.find.mock.calls[1][0]).toMatchObject({ uid: "gt(m-0499)" });
+                expect(repo.update.mock.calls[0][0]).not.toHaveProperty("retainedBodyBlobKeys");
+                expect(blobStore.delete).toHaveBeenCalledWith("za/mbx-1/drafts/old");
+                expect(blobStore.delete).toHaveBeenCalledWith("sanitized/old");
+            });
+
+            it("Counts a failed lookup, or no Matter model at all, as held, logging why.", async () => {
+                for (const matters of [{ find: vi.fn().mockRejectedValue(new Error("matters down")) }, undefined]) {
+                    const { command, repo, blobStore, logger } = await build(draft("bodies/old"), matters);
+
+                    await command.handle(buildContext(changeRequest()).ctx);
+
+                    expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual(["bodies/old"]);
+                    expect(blobStore.delete).not.toHaveBeenCalledWith("bodies/old");
+                    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("legal hold lookup for mailbox mbx-1 failed; keeping the replaced draft body"));
+                }
+            });
+
+            it("Counts a paging cursor that doesn't advance as held.", async () => {
+                const stuck = Array.from({ length: 500 }, () => ({ uid: "m-1", custodianMailboxUids: [] }));
+                const matters = { find: vi.fn().mockResolvedValue(stuck) };
+                const { command, repo } = await build(draft("bodies/old"), matters);
+
+                await command.handle(buildContext(changeRequest()).ctx);
+
+                expect(matters.find).toHaveBeenCalledTimes(2);
+                expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual(["bodies/old"]);
+            });
+
+            it("Refuses the Change (Status 6) when the draft already retains the most bodies it may.", async () => {
+                const full = Array.from({ length: MAX_RETAINED_BODY_BLOB_KEYS }, (_, i) => `bodies/${i}`);
+                const { command, repo } = await build(draft("bodies/old", { retainedBodyBlobKeys: full }), holding());
+
+                const response = await command.handle(buildContext(changeRequest()).ctx);
+
+                expect(responseStatus(response, "Change")).toBe("6");
+                expect(repo.update).not.toHaveBeenCalled();
+            });
+
+            it("Never looks a hold up for, or deletes, a replaced body a draft save didn't store.", async () => {
+                const matters = holding();
+                const { command, blobStore } = await build(draft("blobs/delivered"), matters);
+
+                await command.handle(buildContext(changeRequest()).ctx);
+
+                expect(matters.find).not.toHaveBeenCalled();
+                expect(blobStore.delete).not.toHaveBeenCalledWith("blobs/delivered");
+                expect(blobStore.delete).toHaveBeenCalledWith("sanitized/old");
+            });
         });
 
         it("A draft save that fails removes what it sealed: its index entry is kept when the draft can't be read, and a removal that fails is logged.", async () => {

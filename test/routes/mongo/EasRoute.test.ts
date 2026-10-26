@@ -22,6 +22,7 @@ import {
     FolderMongo,
     LabelMongo,
     MailboxMongo,
+    MatterMongo,
     MessageMongo,
     TaskMongo,
 } from "@rapidmx/restapi/mongo";
@@ -2156,6 +2157,54 @@ describe("Route:EasRouteMongo Tests", () => {
                     expect((await blobStore().get(plain.bodyBlobKey)).toString("utf-8")).toContain("Readable again");
                 });
 
+                it("Keeps, and records for export, the body a device's sealing edit of a draft replaces while an open Matter holds the mailbox; deletes it once the Matter closes.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const readable = await createMessage(mailbox.uid, folder.uid, { subject: "Held draft" });
+                    await blobStore().put(readable.bodyBlobKey, Buffer.from(`Subject: Held draft\r\n\r\n${canary} old body`), { contentType: "message/rfc822" });
+                    const matterRepo: any = (objectFactory.getInstance(ConnectionManager)!.connections.get("mongo") as any).getMongoRepository("MatterMongo");
+                    const matter: any = await matterRepo.save(new MatterMongo({ name: "Hold", escrowScopeId: "scope-1", custodianMailboxUids: [mailbox.uid] }));
+                    try {
+                        const first = await postWbxml(
+                            "Sync",
+                            "dev1",
+                            syncRequestWithCommands(await initialSyncKey("Email", folder.uid), "Email", folder.uid, [change(readable.uid, [textBody("new body")])]),
+                        );
+                        expect(responseOf(first, "Change")).toBeUndefined();
+                        const sealed: any = await byUid(messageRepo, readable.uid);
+                        expect(sealed.zeroAccess).toBeTruthy();
+                        expect(sealed.retainedBodyBlobKeys).toEqual([readable.bodyBlobKey]);
+                        expect((await blobStore().get(readable.bodyBlobKey)).toString("utf-8")).toContain(canary);
+
+                        // Edited again: the earlier sealed body is kept too, though only a `bodies/` key is recorded (restapi exports those).
+                        const second = await postWbxml(
+                            "Sync",
+                            "dev1",
+                            syncRequestWithCommands(childText(collectionOf(first), "SyncKey")!, "Email", folder.uid, [change(readable.uid, [textBody("newer body")])]),
+                        );
+                        expect(responseOf(second, "Change")).toBeUndefined();
+                        const resealed: any = await byUid(messageRepo, readable.uid);
+                        expect(resealed.bodyBlobKey).not.toBe(sealed.bodyBlobKey);
+                        expect(resealed.retainedBodyBlobKeys).toEqual([readable.bodyBlobKey]);
+                        expect(await blobStore().get(sealed.bodyBlobKey)).toBeTruthy();
+
+                        // The Matter closed: the next edit deletes the body it replaces.
+                        matter.closedAt = new Date();
+                        await matterRepo.save(matter);
+                        const third = await postWbxml(
+                            "Sync",
+                            "dev1",
+                            syncRequestWithCommands(childText(collectionOf(second), "SyncKey")!, "Email", folder.uid, [change(readable.uid, [textBody("newest body")])]),
+                        );
+                        expect(responseOf(third, "Change")).toBeUndefined();
+                        await expect(blobStore().get(resealed.bodyBlobKey)).rejects.toThrow();
+                    } finally {
+                        await matterRepo.deleteMany({});
+                    }
+                });
+
                 it("Seals the title and location of one occurrence a device edits in a protected calendar (InstanceId), rather than storing them readable.", async () => {
                     const canary = `CANARY-${uuid.v4()}`;
                     const mailbox = await protect({ calendar: true });
@@ -3163,6 +3212,50 @@ describe("Route:EasRouteMongo Tests", () => {
             expect(JSON.stringify(saved)).not.toContain(canary);
             expect(await blobStore().get(saved.bodyBlobKey)).toBeTruthy();
             expect([...(blobStore() as any).store.values()].some((blob: Buffer) => blob.toString("utf-8").includes(canary))).toBe(false);
+        });
+
+        it("SendMail removes the sealed body, the index entry and the relay's readable sanitized HTML of a sealed Sent Items copy that fails to save.", async () => {
+            const canary = `CANARY-${uuid.v4()}`;
+            const mailbox: any = await createMailbox(owner.uid, ["owner@example.com"]);
+            mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+            mailbox.zeroAccessTypes = { mail: true };
+            await mailboxRepo.save(mailbox);
+            await provisionDevice("dev1");
+            const mime = Buffer.from(
+                ["From: owner@example.com", "To: recipient@example.com", `Subject: ${canary} subject`, "MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8", "", `<p>${canary} body</p>`, ""].join("\r\n"),
+            );
+            const deleted: string[] = [];
+            const store: any = blobStore();
+            const deleteBlob = store.delete.bind(store);
+            const deleteSpy = vi.spyOn(store, "delete").mockImplementation(async (key: any) => {
+                deleted.push(key);
+                return await deleteBlob(key);
+            });
+            const create = RepoUtils.prototype.create;
+            const createSpy = vi.spyOn(RepoUtils.prototype, "create").mockImplementation(async function (this: any, ...args: any[]) {
+                if (args[0]?.zeroAccess) {
+                    throw new Error("database down");
+                }
+                return await (create as any).apply(this, args);
+            });
+            try {
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                    .send(new WbxmlEncoder().encode(composeRequest("SendMail", mime, { saveInSentItems: true })));
+                expect(result.status).toBeGreaterThanOrEqual(400);
+            } finally {
+                createSpy.mockRestore();
+                deleteSpy.mockRestore();
+            }
+            expect(transport().sent).toHaveLength(1);
+            expect(deleted).toEqual(expect.arrayContaining([expect.stringMatching(/^sanitized\//), expect.stringMatching(new RegExp(`^za/${mailbox.uid}/`))]));
+            expect([...store.store.keys()].some((key: string) => key.startsWith(`za/${mailbox.uid}/`))).toBe(false);
+            expect([...store.store.values()].some((blob: Buffer) => blob.toString("utf-8").includes(canary))).toBe(false);
+            const entryRepo: any = (objectFactory.getInstance(ConnectionManager)!.connections.get("mongo") as any).getMongoRepository("ZeroAccessIndexEntryMongo");
+            expect(await entryRepo.count({ mailboxUid: mailbox.uid })).toBe(0);
         });
 
         it("SendMail without SaveInSentItems relays but does not save a copy.", async () => {

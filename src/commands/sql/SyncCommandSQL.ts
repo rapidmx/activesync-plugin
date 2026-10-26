@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { MessageSQL, ContactSQL, CalendarEventSQL, TaskSQL, MailboxSQL, FolderSQL, AuditLogEntrySQL, EncryptionPolicySQL, ZeroAccessIndexEntrySQL } from "@rapidmx/restapi/sql";
+import { MessageSQL, ContactSQL, CalendarEventSQL, TaskSQL, MailboxSQL, FolderSQL, AuditLogEntrySQL, EncryptionPolicySQL, ZeroAccessIndexEntrySQL, MatterSQL } from "@rapidmx/restapi/sql";
 import { EasCollectionStateSQL } from "../../models/sql/EasCollectionStateSQL.js";
 import { EasCollectionChunkSQL } from "../../models/sql/EasCollectionChunkSQL.js";
 import { EmailSyncAdapterSQL } from "../../adapters/sql/EmailSyncAdapterSQL.js";
@@ -19,6 +19,7 @@ export class SyncCommandSQL extends SyncCommand {
     protected auditLogClass: any = AuditLogEntrySQL;
     protected encryptionPolicyClass: any = EncryptionPolicySQL;
     protected zeroAccessIndexEntryClass: any = ZeroAccessIndexEntrySQL;
+    protected matterClass: any = MatterSQL;
     protected folderClass: any = FolderSQL;
     protected collectionStateClass: any = EasCollectionStateSQL;
     protected collectionChunkClass: any = EasCollectionChunkSQL;

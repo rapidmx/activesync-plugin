@@ -152,6 +152,7 @@ const cases: Case[] = [
             ["collectionStateRepo", "collectionStateClass", RepoUtils],
             ["collectionChunkRepo", "collectionChunkClass", RepoUtils],
             ["auditLogRepo", "auditLogClass", RepoUtils],
+            ["matterRepo", "matterClass", RepoUtils],
         ],
         audit: true,
     },

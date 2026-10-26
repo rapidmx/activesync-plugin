@@ -116,7 +116,8 @@ export { stripHeader };
  *
  * **Zero-access** (restapi `specs/search.md` §3): when zero-access covers the mailbox's mail, the Sent Items copy is sealed like delivered
  * mail (`ZeroAccessWriter.sealRaw()`) - its body, subject and preview are never stored readable - unless the device already encrypted it
- * end to end. The sanitized HTML the relay scan wrote is removed whenever no readable copy is saved that names it.
+ * end to end. The sanitized HTML the relay scan wrote is removed whenever no readable copy is saved that names it, including when saving
+ * the copy fails; a copy that fails to save also loses its body blob and, when sealed, the index entry `sealRaw()` wrote.
  *
  * The Sent Items copy and the original's flag change are published to an open web client (`EasLiveUpdates`), and Sent
  * Items' counts refreshed, as restapi's own message writes do.
@@ -192,6 +193,19 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
     protected async markOriginal(_ctx: EasCommandContext, _original: Message & { uid: string }): Promise<(Message & { uid: string }) | undefined> {
         // No-op by default (plain SendMail has nothing to flag).
         return undefined;
+    }
+
+    /** Removes what a Sent Items copy that failed to save stored for it: its body blob, and when it was sealed the index entry
+     * `sealRaw()` wrote, which would otherwise be a search hit for a message that doesn't exist. Best effort: the request fails either way. */
+    private async discardUnfiledCopy(bodyBlobKey: string, sealed: ZeroAccessSealedFields | undefined): Promise<void> {
+        await this.blobStore!.delete(bodyBlobKey).catch((err: any) => {
+            this.logger?.warn(`${this.command}: failed to remove the body of a Sent Items copy that wasn't saved: ${err?.message ?? err}`);
+        });
+        if (sealed) {
+            await this.zeroAccessWriter!.removeIndexEntry(sealed.indexEntryUid).catch((err: any) => {
+                this.logger?.warn(`${this.command}: failed to remove the zero-access index entry of a Sent Items copy that wasn't saved: ${err?.message ?? err}`);
+            });
+        }
     }
 
     /** Whether the message is a reply to its `<Source>`: it is then threaded to it (`In-Reply-To`/`References`, which a device's own
@@ -298,69 +312,77 @@ export abstract class ComposeMailCommand implements EasCommandHandler {
         const relayed = await scanAndRelay(stripped, envelopeFrom, envelopeTo, this.scanPipeline, this.mailTransport, this.blobStore);
 
         let sealed: ZeroAccessSealedFields | undefined;
-        if (saveInSentItemsRequested) {
-            const uid: string = crypto.randomUUID();
-            // The Sent Items copy keeps its Bcc header, but must carry the `Message-ID` the message was actually relayed
-            // with: `scanAndRelay()` injects one when the device's MIME had none, and recall/threading match on it.
-            const stored: Buffer =
-                relayed.raw !== stripped ? prependHeaders(composed, [{ name: "Message-ID", value: `<${relayed.messageId}>` }]) : composed;
-            // Sealed for a zero-access mailbox, as restapi seals its own Sent Items copies - not one the device encrypted end to end,
-            // which is ciphertext already.
-            sealed = relayed.encrypted ? undefined : await this.zeroAccessWriter?.sealRaw(mailbox, stored, uid, new Date());
-            const bodyBlobKey: string = sealed ? sealed.bodyBlobKey : `bodies/${crypto.randomUUID()}`;
-            if (!sealed) {
-                await this.blobStore.put(bodyBlobKey, stored, { contentType: "message/rfc822" });
+        // Set once the Sent Items copy is saved: until then nothing names the relay scan's sanitized HTML.
+        let filed: boolean = false;
+        try {
+            if (saveInSentItemsRequested) {
+                const uid: string = crypto.randomUUID();
+                // The Sent Items copy keeps its Bcc header, but must carry the `Message-ID` the message was actually relayed
+                // with: `scanAndRelay()` injects one when the device's MIME had none, and recall/threading match on it.
+                const stored: Buffer =
+                    relayed.raw !== stripped ? prependHeaders(composed, [{ name: "Message-ID", value: `<${relayed.messageId}>` }]) : composed;
+                // Sealed for a zero-access mailbox, as restapi seals its own Sent Items copies - not one the device encrypted end to end,
+                // which is ciphertext already.
+                sealed = relayed.encrypted ? undefined : await this.zeroAccessWriter?.sealRaw(mailbox, stored, uid, new Date());
+                const bodyBlobKey: string = sealed ? sealed.bodyBlobKey : `bodies/${crypto.randomUUID()}`;
+                let sentFolder: any;
+                let sentCopy: any;
+                try {
+                    if (!sealed) {
+                        await this.blobStore.put(bodyBlobKey, stored, { contentType: "message/rfc822" });
+                    }
+
+                    sentFolder = await findOrCreateWellKnownFolder(this.folderRepo, this.folderClass, ctx.mailboxUid, FolderType.SENT_ITEMS, ctx.user);
+
+                    sentCopy = await this.messageRepo.create(
+                        new this.messageClass({
+                            uid,
+                            folderUid: sentFolder.uid,
+                            mailboxUid: ctx.mailboxUid,
+                            // The relay's own values (angle brackets stripped, as every recipient's ingest stores them), bounded
+                            // the way restapi stores indexed identifiers - not mailparser's bracketed `Message-ID`.
+                            messageId: boundIndexedValue(relayed.messageId),
+                            conversationId: boundIndexedValue(relayed.conversationId),
+                            subject: sealed ? sealed.subject : (parsed.subject ?? ""),
+                            from: { address: envelopeFrom, type: RecipientType.TO },
+                            recipients: buildRecipients(parsed),
+                            sentDate: new Date(),
+                            receivedDate: new Date(),
+                            bodyBlobKey,
+                            sanitizedHtmlBlobKey: sealed ? undefined : relayed.sanitizedHtmlBlobKey,
+                            encrypted: relayed.encrypted,
+                            bodyPreview: sealed ? sealed.bodyPreview : (parsed.text ?? "").slice(0, 200),
+                            ...(sealed ? { zeroAccess: sealed.zeroAccess } : {}),
+                            flags: { read: true, flagged: false, answered: false, forwarded: false },
+                            importance: MessageImportance.NORMAL,
+                            inReplyTo: original?.messageId,
+                            references: original ? [...original.references, original.messageId] : [],
+                            /* v8 ignore next -- unreachable via real mailparser output: simpleParser() always initializes
+                             * `attachments` to `[]`, never leaves it undefined, so the `?.`/`?? 0` fallback never fires */
+                            hasAttachments: (parsed.attachments?.length ?? 0) > 0,
+                        } as any),
+                        { ignoreACL: true, user: ctx.user },
+                    );
+                } catch (err) {
+                    await this.discardUnfiledCopy(bodyBlobKey, sealed);
+                    throw err;
+                }
+                filed = true;
+                new EasLiveUpdates(this.notificationUtils).publish(sentFolder.uid, this.messageClass.name, "create", sentCopy);
+                await refreshFolderCounts(
+                    { messageRepo: this.messageRepo, folderRepo: this.folderRepo, folderClass: this.folderClass, notificationUtils: this.notificationUtils, logger: this.logger },
+                    [sentFolder.uid],
+                );
             }
-
-            const sentFolder: any = await findOrCreateWellKnownFolder(
-                this.folderRepo,
-                this.folderClass,
-                ctx.mailboxUid,
-                FolderType.SENT_ITEMS,
-                ctx.user,
-            );
-
-            const sentCopy = await this.messageRepo.create(
-                new this.messageClass({
-                    uid,
-                    folderUid: sentFolder.uid,
-                    mailboxUid: ctx.mailboxUid,
-                    // The relay's own values (angle brackets stripped, as every recipient's ingest stores them), bounded
-                    // the way restapi stores indexed identifiers - not mailparser's bracketed `Message-ID`.
-                    messageId: boundIndexedValue(relayed.messageId),
-                    conversationId: boundIndexedValue(relayed.conversationId),
-                    subject: sealed ? sealed.subject : (parsed.subject ?? ""),
-                    from: { address: envelopeFrom, type: RecipientType.TO },
-                    recipients: buildRecipients(parsed),
-                    sentDate: new Date(),
-                    receivedDate: new Date(),
-                    bodyBlobKey,
-                    sanitizedHtmlBlobKey: sealed ? undefined : relayed.sanitizedHtmlBlobKey,
-                    encrypted: relayed.encrypted,
-                    bodyPreview: sealed ? sealed.bodyPreview : (parsed.text ?? "").slice(0, 200),
-                    ...(sealed ? { zeroAccess: sealed.zeroAccess } : {}),
-                    flags: { read: true, flagged: false, answered: false, forwarded: false },
-                    importance: MessageImportance.NORMAL,
-                    inReplyTo: original?.messageId,
-                    references: original ? [...original.references, original.messageId] : [],
-                    /* v8 ignore next -- unreachable via real mailparser output: simpleParser() always initializes
-                     * `attachments` to `[]`, never leaves it undefined, so the `?.`/`?? 0` fallback never fires */
-                    hasAttachments: (parsed.attachments?.length ?? 0) > 0,
-                } as any),
-                { ignoreACL: true, user: ctx.user },
-            );
-            new EasLiveUpdates(this.notificationUtils).publish(sentFolder.uid, this.messageClass.name, "create", sentCopy);
-            await refreshFolderCounts(
-                { messageRepo: this.messageRepo, folderRepo: this.folderRepo, folderClass: this.folderClass, notificationUtils: this.notificationUtils, logger: this.logger },
-                [sentFolder.uid],
-            );
-        }
-        if (relayed.sanitizedHtmlBlobKey && (!saveInSentItemsRequested || sealed)) {
-            // Nothing names the relay scan's sanitized HTML: it would only be readable content left behind.
-            try {
-                await this.blobStore.delete(relayed.sanitizedHtmlBlobKey);
-            } catch (err: any) {
-                this.logger?.warn(`${this.command}: failed to remove the sanitized HTML of a sent message: ${err?.message}`);
+        } finally {
+            if (relayed.sanitizedHtmlBlobKey && (!saveInSentItemsRequested || sealed || !filed)) {
+                // Nothing names the relay scan's sanitized HTML - no copy was saved, a sealed one was, or saving it failed: it would only be
+                // readable content left behind.
+                try {
+                    await this.blobStore.delete(relayed.sanitizedHtmlBlobKey);
+                } catch (err: any) {
+                    this.logger?.warn(`${this.command}: failed to remove the sanitized HTML of a sent message: ${err?.message}`);
+                }
             }
         }
 

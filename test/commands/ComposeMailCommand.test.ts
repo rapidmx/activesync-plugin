@@ -403,6 +403,82 @@ describe("ComposeMailCommand Tests (guard clauses only)", () => {
             expect(messageRepo.create.mock.calls[0][0].sanitizedHtmlBlobKey).toMatch(/^sanitized\//);
         });
 
+        describe("a Sent Items copy that fails to save", () => {
+            const SEALED = { subject: "[...]", bodyPreview: "", bodyBlobKey: "za/mbx/sent-1", zeroAccess: { sealed: true }, indexEntryUid: "entry-1" };
+            /** A command whose relay scan writes sanitized HTML, with `sealRaw` as the zero-access writer's seal and every blob or index
+             * entry removal failing as `removalsFail` says. */
+            const failing = (sealRaw: () => Promise<any>, removalsFail = false) => {
+                const built = build(SendMailCommandMongo);
+                const command: any = built.command;
+                command.scanPipeline.run = vi.fn(async () => ({
+                    spam: { verdict: "clean", symbols: [] },
+                    av: { verdict: "clean" },
+                    references: [],
+                    encrypted: false,
+                    sanitizedHtml: "<p>Body</p>",
+                }));
+                command.blobStore.delete = removalsFail ? vi.fn().mockRejectedValue(new Error("store down")) : vi.fn(async () => undefined);
+                command.zeroAccessWriter = {
+                    sealRaw: vi.fn(sealRaw),
+                    removeIndexEntry: removalsFail ? vi.fn().mockRejectedValue(new Error("index down")) : vi.fn(async () => undefined),
+                };
+                command.logger = { warn: vi.fn(), info: vi.fn() };
+                return { ...built, command };
+            };
+            const deleted = (command: any): string[] => command.blobStore.delete.mock.calls.map((call: any[]) => call[0]);
+
+            it("Removes the sealed body, its index entry and the relay's sanitized HTML when the sealed copy's create fails.", async () => {
+                const { command, messageRepo, sendMessage } = failing(async () => ({ ...SEALED }));
+                messageRepo.create.mockRejectedValue(new Error("database down"));
+
+                await expect(command.handle(ctx({ SaveInSentItems: "" }))).rejects.toThrow("database down");
+
+                expect(deleted(command)).toEqual(["za/mbx/sent-1", expect.stringMatching(/^sanitized\//)]);
+                expect(command.zeroAccessWriter.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+                expect(sendMessage).not.toHaveBeenCalled();
+            });
+
+            it("Removes the relay's sanitized HTML when sealing the copy fails.", async () => {
+                const { command, messageRepo } = failing(async () => {
+                    throw new Error("policy lookup failed");
+                });
+
+                await expect(command.handle(ctx({ SaveInSentItems: "" }))).rejects.toThrow("policy lookup failed");
+
+                expect(deleted(command)).toEqual([expect.stringMatching(/^sanitized\//)]);
+                expect(command.zeroAccessWriter.removeIndexEntry).not.toHaveBeenCalled();
+                expect(messageRepo.create).not.toHaveBeenCalled();
+            });
+
+            it("Removes the readable body and the relay's sanitized HTML when a readable copy's create fails, logging removals that fail.", async () => {
+                const { command, messageRepo } = failing(async () => undefined, true);
+                messageRepo.create.mockRejectedValue(new Error("database down"));
+
+                await expect(command.handle(ctx({ SaveInSentItems: "" }))).rejects.toThrow("database down");
+
+                expect(deleted(command)).toEqual([expect.stringMatching(/^bodies\//), expect.stringMatching(/^sanitized\//)]);
+                expect(command.blobStore.put).toHaveBeenCalledWith(deleted(command)[0], expect.any(Buffer), expect.anything());
+                expect(command.zeroAccessWriter.removeIndexEntry).not.toHaveBeenCalled();
+                expect(command.logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to remove the body of a Sent Items copy that wasn't saved: store down"));
+                expect(command.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/failed to remove the sanitized HTML/));
+            });
+
+            it("Logs a sealed copy's index entry that can't be removed, and keeps the sanitized HTML of a readable copy saved before a later step fails.", async () => {
+                const sealedRun = failing(async () => ({ ...SEALED }), true);
+                sealedRun.messageRepo.create.mockRejectedValue(new Error("database down"));
+                await expect(sealedRun.command.handle(ctx({ SaveInSentItems: "" }))).rejects.toThrow("database down");
+                expect(sealedRun.command.logger.warn).toHaveBeenCalledWith(
+                    expect.stringContaining("failed to remove the zero-access index entry of a Sent Items copy that wasn't saved: index down"),
+                );
+
+                // Saved readable, then refreshing Sent Items' counts fails: the copy names its sanitized HTML, which stays.
+                const { command, folderRepo } = failing(async () => undefined);
+                folderRepo.find.mockResolvedValueOnce([{ ...SENT_FOLDER }]).mockRejectedValue(new Error("folders down"));
+                await command.handle(ctx({ SaveInSentItems: "" })).catch(() => undefined);
+                expect(deleted(command)).toEqual([]);
+            });
+        });
+
         it("Publishes nothing when SaveInSentItems is off and there is no original to flag.", async () => {
             const { command, sendMessage, messageRepo, send } = build(SendMailCommandMongo);
 

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { MessageMongo, ContactMongo, CalendarEventMongo, TaskMongo, MailboxMongo, FolderMongo, AuditLogEntryMongo, EncryptionPolicyMongo, ZeroAccessIndexEntryMongo } from "@rapidmx/restapi/mongo";
+import { MessageMongo, ContactMongo, CalendarEventMongo, TaskMongo, MailboxMongo, FolderMongo, AuditLogEntryMongo, EncryptionPolicyMongo, ZeroAccessIndexEntryMongo, MatterMongo } from "@rapidmx/restapi/mongo";
 import { EasCollectionStateMongo } from "../../models/mongo/EasCollectionStateMongo.js";
 import { EasCollectionChunkMongo } from "../../models/mongo/EasCollectionChunkMongo.js";
 import { EmailSyncAdapterMongo } from "../../adapters/mongo/EmailSyncAdapterMongo.js";
@@ -19,6 +19,7 @@ export class SyncCommandMongo extends SyncCommand {
     protected auditLogClass: any = AuditLogEntryMongo;
     protected encryptionPolicyClass: any = EncryptionPolicyMongo;
     protected zeroAccessIndexEntryClass: any = ZeroAccessIndexEntryMongo;
+    protected matterClass: any = MatterMongo;
     protected folderClass: any = FolderMongo;
     protected collectionStateClass: any = EasCollectionStateMongo;
     protected collectionChunkClass: any = EasCollectionChunkMongo;
