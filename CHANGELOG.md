@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-26
+
+### Changed
+- Publish only from a release tag's own Build, and only once every Build of that commit has finished green
+- Decide whether a lease SET cut short by the wait's deadline gave up or found Redis unresponsive by the timeout applied, not by re-reading the clock
+- Describe the 1.2.1 fixes in the release notes
+
 ## [1.2.0] - 2026-10-26
 
 ### Changed
@@ -467,7 +474,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0-beta.18...v1.0.0

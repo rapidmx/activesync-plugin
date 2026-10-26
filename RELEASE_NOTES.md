@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.2.1
+
 ### Fixed
 
 - **A collection lease no longer falls back to the in-process lock when only its wait ran out.** When another server copy held a collection and the wait expired during a Redis SET, the lease could treat a timer firing a millisecond early as an unresponsive Redis and proceed without the shared lock. It now gives up, as intended.
