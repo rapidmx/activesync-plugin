@@ -2079,7 +2079,7 @@ describe("Route:EasRouteSQL Tests", () => {
                         expect(sealed.retainedBodyBlobKeys).toEqual([readable.bodyBlobKey]);
                         expect((await blobStore().get(readable.bodyBlobKey)).toString("utf-8")).toContain(canary);
 
-                        // Edited again: the earlier sealed body is kept too, though only a `bodies/` key is recorded (restapi exports those).
+                        // Edited again: the earlier sealed body (the mailbox's own `za/<mailbox>/drafts/` key) is kept and recorded too, for restapi to export.
                         const second = await postWbxml(
                             "Sync",
                             "dev1",
@@ -2088,7 +2088,8 @@ describe("Route:EasRouteSQL Tests", () => {
                         expect(responseOf(second, "Change")).toBeUndefined();
                         const resealed: any = await byUid(messageRepo, readable.uid);
                         expect(resealed.bodyBlobKey).not.toBe(sealed.bodyBlobKey);
-                        expect(resealed.retainedBodyBlobKeys).toEqual([readable.bodyBlobKey]);
+                        expect(sealed.bodyBlobKey.startsWith(`za/${mailbox.uid}/drafts/`)).toBe(true);
+                        expect(resealed.retainedBodyBlobKeys).toEqual([readable.bodyBlobKey, sealed.bodyBlobKey]);
                         expect(await blobStore().get(sealed.bodyBlobKey)).toBeTruthy();
 
                         // The Matter closed: the next edit deletes the body it replaces.
@@ -2101,6 +2102,7 @@ describe("Route:EasRouteSQL Tests", () => {
                         );
                         expect(responseOf(third, "Change")).toBeUndefined();
                         await expect(blobStore().get(resealed.bodyBlobKey)).rejects.toThrow();
+                        expect((await byUid(messageRepo, readable.uid)).retainedBodyBlobKeys).toEqual([readable.bodyBlobKey, sealed.bodyBlobKey]);
                     } finally {
                         await matterRepo.clear();
                     }
@@ -3150,6 +3152,53 @@ describe("Route:EasRouteSQL Tests", () => {
                 deleteSpy.mockRestore();
             }
             expect(transport().sent).toHaveLength(1);
+            expect(deleted).toEqual(expect.arrayContaining([expect.stringMatching(/^sanitized\//), expect.stringMatching(new RegExp(`^za/${mailbox.uid}/`))]));
+            expect([...store.store.keys()].some((key: string) => key.startsWith(`za/${mailbox.uid}/`))).toBe(false);
+            expect([...store.store.values()].some((blob: Buffer) => blob.toString("utf-8").includes(canary))).toBe(false);
+            const entryRepo: any = (objectFactory.getInstance(ConnectionManager)!.connections.get("sql") as any).getRepository(ZeroAccessIndexEntrySQL);
+            expect(await entryRepo.count({ where: { mailboxUid: mailbox.uid } })).toBe(0);
+        });
+
+        it("SendMail removes the sealed body and the relay's readable sanitized HTML when sealing the Sent Items copy fails writing its index entry.", async () => {
+            const canary = `CANARY-${uuid.v4()}`;
+            const mailbox: any = await createMailbox(owner.uid, ["owner@example.com"]);
+            mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+            mailbox.zeroAccessTypes = { mail: true };
+            await mailboxRepo.save(mailbox);
+            await provisionDevice("dev1");
+            const mime = Buffer.from(
+                ["From: owner@example.com", "To: recipient@example.com", `Subject: ${canary} subject`, "MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8", "", `<p>${canary} body</p>`, ""].join("\r\n"),
+            );
+            const deleted: string[] = [];
+            const store: any = blobStore();
+            const deleteBlob = store.delete.bind(store);
+            const deleteSpy = vi.spyOn(store, "delete").mockImplementation(async (key: any) => {
+                deleted.push(key);
+                return await deleteBlob(key);
+            });
+            const create = RepoUtils.prototype.create;
+            const createSpy = vi.spyOn(RepoUtils.prototype, "create").mockImplementation(async function (this: any, ...args: any[]) {
+                // The index entry sealRaw() writes after storing the sealed blob.
+                if (args[0]?.keyFingerprint && args[0]?.sealed) {
+                    throw new Error("index down");
+                }
+                return await (create as any).apply(this, args);
+            });
+            try {
+                const result = await request(server.getApplication())
+                    .post(`${baseUrl}?Cmd=SendMail&DeviceId=dev1`)
+                    .set("Authorization", "jwt " + ownerToken)
+                    .set("X-MS-PolicyKey", await policyKeyOf("dev1"))
+                    .set("Content-Type", "application/vnd.ms-sync.wbxml")
+                    .send(new WbxmlEncoder().encode(composeRequest("SendMail", mime, { saveInSentItems: true })));
+                expect(result.status).toBeGreaterThanOrEqual(400);
+                expect(createSpy.mock.calls.some((call: any[]) => call[0]?.keyFingerprint && call[0]?.sealed)).toBe(true);
+            } finally {
+                createSpy.mockRestore();
+                deleteSpy.mockRestore();
+            }
+            expect(transport().sent).toHaveLength(1);
+            // restapi's seal() removes the blob it stored; the command removes the relay scan's sanitized HTML.
             expect(deleted).toEqual(expect.arrayContaining([expect.stringMatching(/^sanitized\//), expect.stringMatching(new RegExp(`^za/${mailbox.uid}/`))]));
             expect([...store.store.keys()].some((key: string) => key.startsWith(`za/${mailbox.uid}/`))).toBe(false);
             expect([...store.store.values()].some((blob: Buffer) => blob.toString("utf-8").includes(canary))).toBe(false);

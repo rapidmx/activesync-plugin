@@ -1163,12 +1163,12 @@ describe("SyncCommand Tests (isolated)", () => {
                 expect(matters.find).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ skipCache: true }));
             });
 
-            it("Keeps an earlier sealed draft body under a hold without recording it, as the server does.", async () => {
+            it("Keeps an earlier sealed draft body under a hold and records it, as the server does.", async () => {
                 const { command, repo, blobStore } = await build(draft("za/mbx-1/drafts/old"), holding());
 
                 await command.handle(buildContext(changeRequest()).ctx);
 
-                expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual([]);
+                expect(repo.update.mock.calls[0][0].retainedBodyBlobKeys).toEqual(["za/mbx-1/drafts/old"]);
                 expect(blobStore.delete).not.toHaveBeenCalledWith("za/mbx-1/drafts/old");
             });
 
