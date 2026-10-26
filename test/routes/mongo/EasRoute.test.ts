@@ -12,7 +12,7 @@ import { testZeroAccessKey } from "../../zeroAccessTestKey.js";
 import * as http from "http";
 import config from "../../config.js";
 import { request } from "@rapidrest/service-core/test";
-import { MongoConnection, MongoRepository, Server, ObjectFactory, ConnectionManager, ACLAction } from "@rapidrest/service-core";
+import { MongoConnection, MongoRepository, Server, ObjectFactory, ConnectionManager, ACLAction, RepoUtils } from "@rapidrest/service-core";
 import { JWTUtils, Logger } from "@rapidrest/core";
 import * as uuid from "uuid";
 import {
@@ -43,6 +43,9 @@ import {
     BusyStatus,
     RecurrenceFrequency,
     TaskPriority,
+    ZeroAccessWriter,
+    zeroAccessDraftBlobPrefix,
+    zeroAccessIndexEntryUid,
 } from "@rapidmx/restapi";
 
 const mongod: MongoMemoryServer = new MongoMemoryServer({
@@ -2590,6 +2593,177 @@ describe("Route:EasRouteMongo Tests", () => {
                     expect(childText(responseOf(renamed, "Change")!, "Status")).toBe("6");
                     const rows: any[] = await byIcalUid(calendarEventRepo, master.icalUid);
                     expect(rows.every((row) => row.title === "[...]" && (row.sealedFields ?? null) === null)).toBe(true);
+                });
+            });
+
+            describe("Fourth review fixes", () => {
+                const protect = async (types: Record<string, boolean>): Promise<any> => {
+                    const mailbox: any = await createMailbox(owner.uid);
+                    mailbox.zeroAccessKeys = [await testZeroAccessKey()];
+                    mailbox.zeroAccessTypes = types;
+                    return await mailboxRepo.save(mailbox);
+                };
+                const textBody = (data: string) =>
+                    element(WbxmlCodePage.AirSyncBase, "Body", [textElement(WbxmlCodePage.AirSyncBase, "Type", "1"), textElement(WbxmlCodePage.AirSyncBase, "Data", data)]);
+                const responseOf = (response: WbxmlElement, tag: string) => findChild(findChild(collectionOf(response), "Responses") ?? element(WbxmlCodePage.AirSync, "Responses", []), tag);
+                const add = (clientId: string, fields: WbxmlElement[]) =>
+                    element(WbxmlCodePage.AirSync, "Add", [textElement(WbxmlCodePage.AirSync, "ClientId", clientId), element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+                const change = (serverId: string, fields: WbxmlElement[]) =>
+                    element(WbxmlCodePage.AirSync, "Change", [textElement(WbxmlCodePage.AirSync, "ServerId", serverId), element(WbxmlCodePage.AirSync, "ApplicationData", fields)]);
+                const entryOf = async (messageUid: string): Promise<any> =>
+                    await (objectFactory.getInstance(ConnectionManager)?.connections.get("mongo") as any)
+                        .getMongoRepository("ZeroAccessIndexEntryMongo")
+                        .findOne({ uid: zeroAccessIndexEntryUid(messageUid) });
+                /** Another client's save of message `uid`: `fields` written with a new version. */
+                const overwrite = async (uid: string, fields: Record<string, unknown>): Promise<void> => {
+                    const current: any = await byUid(messageRepo, uid);
+                    await messageRepo.updateOne({ uid }, { $set: { ...fields, version: current.version + 1 } });
+                };
+                const removeRow = async (uid: string): Promise<void> => {
+                    await messageRepo.deleteOne({ uid });
+                };
+                /** Runs `run` with `during` called right after each draft body it seals is stored, before the device's save is written: another
+                 * client's save landing in between. Answers the Sync response and the sealed bodies' keys. */
+                const racing = async (during: (messageUid: string) => Promise<void>, run: () => Promise<WbxmlElement>): Promise<{ response: WbxmlElement; keys: string[] }> => {
+                    const sealDraft = ZeroAccessWriter.prototype.sealDraft;
+                    const keys: string[] = [];
+                    const spy = vi.spyOn(ZeroAccessWriter.prototype, "sealDraft").mockImplementation(async function (this: ZeroAccessWriter, ...args: any[]) {
+                        const sealed: any = await (sealDraft as any).apply(this, args);
+                        keys.push(sealed.bodyBlobKey);
+                        await during(args[2]);
+                        return sealed;
+                    });
+                    try {
+                        return { response: await run(), keys };
+                    } finally {
+                        spy.mockRestore();
+                    }
+                };
+                /** A draft a device added to `folder`, sealed: its uid and the Sync key after the Add. */
+                const sealedDraft = async (folder: any): Promise<{ uid: string; syncKey: string }> => {
+                    const added = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(await initialSyncKey("Email", folder.uid), "Email", folder.uid, [
+                            add("client-1", [textElement(WbxmlCodePage.Email, "Subject", "Draft"), textBody("first body")]),
+                        ]),
+                    );
+                    const uid: string = childText(responseOf(added, "Add")!, "ServerId")!;
+                    expect((await byUid(messageRepo, uid)).zeroAccess).toBeTruthy();
+                    expect(await entryOf(uid)).toBeTruthy();
+                    return { uid, syncKey: childText(collectionOf(added), "SyncKey")! };
+                };
+
+                it("Removes the sealed body and index entry of a device's draft Change that loses its version check to another sealed save.", async () => {
+                    const canary = `CANARY-${uuid.v4()}`;
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const { uid, syncKey } = await sealedDraft(folder);
+                    const winnerKey = `${zeroAccessDraftBlobPrefix(mailbox.uid)}${uuid.v4()}`;
+
+                    const { response, keys } = await racing(
+                        async () => await overwrite(uid, { bodyBlobKey: winnerKey }),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(uid, [textBody(`${canary} phone`)])])),
+                    );
+
+                    expect(childText(responseOf(response, "Change")!, "Status")).toBe("7");
+                    expect(keys).toHaveLength(1);
+                    await expect(blobStore().get(keys[0])).rejects.toThrow();
+                    expect(await entryOf(uid)).toBeFalsy();
+                    expect((await byUid(messageRepo, uid)).bodyBlobKey).toBe(winnerKey);
+                });
+
+                it("Keeps the index entry of a device's losing draft Change once the draft was assembled readable for sending.", async () => {
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const { uid, syncKey } = await sealedDraft(folder);
+
+                    // Assembled readable for sending meanwhile: the entry is all the Sent Items copy will get.
+                    const assembled = await racing(
+                        async () => await overwrite(uid, { zeroAccess: null, bodyBlobKey: `composed/${uuid.v4()}` }),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(uid, [textBody("phone body")])])),
+                    );
+                    expect(childText(responseOf(assembled.response, "Change")!, "Status")).toBe("7");
+                    await expect(blobStore().get(assembled.keys[0])).rejects.toThrow();
+                    expect(await entryOf(uid)).toBeTruthy();
+                });
+
+                it("Removes the sealed body and index entry of a device's draft Change whose draft is deleted meanwhile, and of an Add whose create fails.", async () => {
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const folder = await createFolderWithAcl(mailbox.uid, { name: "Drafts", type: FolderType.DRAFTS });
+                    const { uid, syncKey } = await sealedDraft(folder);
+
+                    const deleted = await racing(
+                        async () => await removeRow(uid),
+                        async () => await postWbxml("Sync", "dev1", syncRequestWithCommands(syncKey, "Email", folder.uid, [change(uid, [textBody("phone body")])])),
+                    );
+                    expect(["6", "7", "8"]).toContain(childText(responseOf(deleted.response, "Change")!, "Status"));
+                    await expect(blobStore().get(deleted.keys[0])).rejects.toThrow();
+                    expect(await entryOf(uid)).toBeFalsy();
+
+                    let failing: string | undefined;
+                    const create = RepoUtils.prototype.create;
+                    const createSpy = vi.spyOn(RepoUtils.prototype, "create").mockImplementation(async function (this: any, ...args: any[]) {
+                        if (failing && args[0]?.uid === failing) {
+                            throw new Error("database down");
+                        }
+                        return await (create as any).apply(this, args);
+                    });
+                    try {
+                        const added = await racing(
+                            async (messageUid) => {
+                                failing = messageUid;
+                            },
+                            async () =>
+                                await postWbxml(
+                                    "Sync",
+                                    "dev1",
+                                    syncRequestWithCommands(childText(collectionOf(deleted.response), "SyncKey")!, "Email", folder.uid, [
+                                        add("client-2", [textElement(WbxmlCodePage.Email, "Subject", "Lost"), textBody("lost body")]),
+                                    ]),
+                                ),
+                        );
+                        expect(childText(responseOf(added.response, "Add")!, "Status")).toBe("6");
+                        expect(added.keys).toHaveLength(1);
+                        await expect(blobStore().get(added.keys[0])).rejects.toThrow();
+                        expect(await entryOf(failing!)).toBeFalsy();
+                        expect(await byUid(messageRepo, failing!)).toBeFalsy();
+                    } finally {
+                        createSpy.mockRestore();
+                    }
+                });
+
+                it("Keeps the search stamp of a readable message waiting in a zero-access mailbox's Outbox when a device flags it, and clears it otherwise.", async () => {
+                    const mailbox = await protect({ mail: true });
+                    await provisionDevice("dev1");
+                    const outbox = await createFolderWithAcl(mailbox.uid, { name: "Outbox", type: FolderType.OUTBOX });
+                    const stamped = { searchIndexedAt: new Date(), searchIndexAttempts: 0 };
+                    const waiting = await createMessage(mailbox.uid, outbox.uid, { ...stamped, scheduledSendTime: new Date(Date.now() + 86_400_000) });
+                    const sealed = await createMessage(mailbox.uid, outbox.uid, { ...stamped, subject: "[...]", zeroAccess: { keyFingerprint: "fp" } } as any);
+                    const read = (uid: string) => change(uid, [textElement(WbxmlCodePage.Email, "Read", "1")]);
+
+                    const flagged = await postWbxml("Sync", "dev1", syncRequestWithCommands(await initialSyncKey("Email", outbox.uid), "Email", outbox.uid, [read(waiting.uid), read(sealed.uid)]));
+                    expect(responseOf(flagged, "Change")).toBeUndefined();
+                    const kept: any = await byUid(messageRepo, waiting.uid);
+                    expect(kept.flags.read).toBe(true);
+                    expect(kept.searchIndexedAt).toBeTruthy();
+                    // A sealed message is only ever indexed as metadata, so its stamp is cleared as before.
+                    expect((await byUid(messageRepo, sealed.uid)).searchIndexedAt ?? null).toBeNull();
+
+                    // Once zero-access is off, a readable message is indexed readable anyway.
+                    const current: any = await byUid(mailboxRepo, mailbox.uid);
+                    current.zeroAccessKeys = [];
+                    await mailboxRepo.save(current);
+                    const unread = await postWbxml(
+                        "Sync",
+                        "dev1",
+                        syncRequestWithCommands(childText(collectionOf(flagged), "SyncKey")!, "Email", outbox.uid, [change(waiting.uid, [textElement(WbxmlCodePage.Email, "Read", "0")])]),
+                    );
+                    expect(responseOf(unread, "Change")).toBeUndefined();
+                    expect((await byUid(messageRepo, waiting.uid)).searchIndexedAt ?? null).toBeNull();
                 });
             });
 

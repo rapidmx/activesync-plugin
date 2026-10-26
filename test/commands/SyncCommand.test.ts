@@ -1113,6 +1113,47 @@ describe("SyncCommand Tests (isolated)", () => {
             expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/could not remove the replaced body of sealed draft item-1/));
         });
 
+        it("A draft save that fails removes what it sealed: its index entry is kept when the draft can't be read, and a removal that fails is logged.", async () => {
+            const sealed = { subject: "[...]", bodyPreview: "", bodyBlobKey: "za/mbx-1/drafts/loser", zeroAccess: { sealed: true }, indexEntryUid: "entry-1" };
+            const writer = { sealDraft: vi.fn().mockResolvedValue(sealed), removeIndexEntry: vi.fn().mockRejectedValue(new Error("index down")), target: vi.fn() };
+            const adapter = fakeAdapter({ collectionClass: "Email", fromApplicationData: async (_data, _existing, _mailbox, options) => (await options!.sealDraftBody!(Buffer.from("mime")))! });
+            const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID, mailboxUid: "mbx-1" };
+            const repo = fakeRepo({
+                // The losing Change's lookup of what the draft is now fails.
+                findOne: vi.fn().mockResolvedValueOnce(existing).mockRejectedValueOnce(new Error("lookup down")),
+                update: vi.fn().mockRejectedValue(new ApiError(ApiErrors.INVALID_OBJECT_VERSION, 409, "Version conflict")),
+                create: vi.fn().mockRejectedValue(new Error("db down")),
+            });
+            const { command, logger } = await buildCommand("Email", adapter, repo, { folder: { uid: FOLDER_UID, mailboxUid: "mbx-1", type: FolderType.DRAFTS } });
+            (command as any).zeroAccessWriter = writer;
+            (command as any).blobStore = { delete: vi.fn().mockRejectedValue(new Error("blob down")) };
+            const request = (command: WbxmlElement) =>
+                element(WbxmlCodePage.AirSync, "Sync", [
+                    element(WbxmlCodePage.AirSync, "Collections", [
+                        collectionEl([element(WbxmlCodePage.AirSync, "Commands", [command])], { collectionClass: "Email" }),
+                    ]),
+                ]);
+            const applicationData = element(WbxmlCodePage.AirSync, "ApplicationData", []);
+
+            const changed = await command.handle(
+                buildContext(request(element(WbxmlCodePage.AirSync, "Change", [textElement(WbxmlCodePage.AirSync, "ServerId", "item-1"), applicationData]))).ctx,
+            );
+            expect(responseStatus(changed, "Change")).toBe("7");
+            expect((command as any).blobStore.delete).toHaveBeenCalledWith("za/mbx-1/drafts/loser");
+            expect(writer.removeIndexEntry).not.toHaveBeenCalled();
+            expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("could not tell whether draft item-1's zero-access index entry outlived a failed save; keeping it: lookup down"));
+
+            // An Add that is never created: nothing else can own its uid, so the entry goes without a lookup.
+            const added = await command.handle(
+                buildContext(request(element(WbxmlCodePage.AirSync, "Add", [textElement(WbxmlCodePage.AirSync, "ClientId", "client-1"), applicationData]))).ctx,
+            );
+            expect(responseStatus(added, "Add")).toBe("6");
+            expect(writer.sealDraft).toHaveBeenCalledTimes(2);
+            expect(writer.removeIndexEntry).toHaveBeenCalledWith("entry-1");
+            expect(repo.findOne).toHaveBeenCalledTimes(2);
+            expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("could not remove the zero-access index entry of draft (not created) after a failed save: index down"));
+        });
+
         it("Change: reports Status 6 when the adapter has no changeInstance(), Status 7 on a version conflict, and Status 6 on any other changeInstance() failure.", async () => {
             const existing = { uid: "item-1", version: 1, folderUid: FOLDER_UID };
 

@@ -35,6 +35,8 @@ import {
     deleteBlobsIfUnreferenced,
     messageBlobReferenceSources,
     type ZeroAccessWriter,
+    type ZeroAccessSealedFields,
+    zeroAccessDraftBlobPrefix,
     MeetingInviteSender,
     protectedInvitationsPending,
     type InvitationContent,
@@ -66,6 +68,8 @@ import type { EasCollectionState } from "../models/EasCollectionState.js";
 const COLLECTION_DATA_TYPES: Readonly<Record<string, "calendar" | "contacts" | "tasks">> = { Calendar: "calendar", Contacts: "contacts", Tasks: "tasks" };
 /** The `Message` fields a device's Change can write that restapi's `SearchIndexJob` puts in a message's search document. */
 const SEARCH_INDEXED_FIELDS: readonly string[] = ["subject", "recipients", "flags", "bodyBlobKey"];
+/** `draftWriteOptions()`'s options, which also record what their `sealDraftBody` sealed. */
+type DraftWriteOptions = SyncWriteOptions & { sealed?: ZeroAccessSealedFields };
 /** The fields of an event made from a zero-access invitation that its `sealedContent` holds, sealed whole (restapi `specs/search.md` §4). */
 const SEALED_CONTENT_FIELDS: readonly string[] = ["title", "location", "description", "descriptionHtml"];
 const { Config, Init, Inject, Logger } = ObjectDecorators;
@@ -836,17 +840,18 @@ export abstract class SyncCommand implements EasCommandHandler {
         if (!(await hasMailAccess(this.aclUtils, this.trustedRoles, ctx.user, folder.uid, ACLAction.CREATE))) {
             return this.addResponseElement(clientId, undefined, "6");
         }
+        // A draft's uid is chosen up front when it may be sealed: the sealed body and its index entry are keyed by it.
+        const uid: string = crypto.randomUUID();
+        const options: DraftWriteOptions | undefined = this.draftWriteOptions(round, uid);
+        let created: any;
         try {
             const mailbox = await round.getMailbox();
             const defaults = adapter.newEntityDefaults ? adapter.newEntityDefaults(mailbox) : {};
-            // A draft's uid is chosen up front when it may be sealed: the sealed body and its index entry are keyed by it.
-            const uid: string = crypto.randomUUID();
-            const options: SyncWriteOptions | undefined = this.draftWriteOptions(round, uid);
             const partial = await adapter.fromApplicationData(appData, undefined, mailbox, options);
             const body: any = { ...defaults, ...partial, ...(options ? { uid } : {}), mailboxUid: folder.mailboxUid, folderUid: folder.uid };
             const content: InvitationContent | undefined = round.collectionClass === "Calendar" ? invitationContentOf(body) : undefined;
             await this.sealDeviceWrite(round, body, undefined);
-            const created = await repo.create(body, { ignoreACL: true });
+            created = await repo.create(body, { ignoreACL: true });
             // The invitations' claim writes the row again: that later write is the device's own too, or its Add would come back as a Change.
             const stored = (await this.inviteProtectedAdd(repo, created, content)) ?? created;
             this.noteWrite(round, stored);
@@ -856,6 +861,10 @@ export abstract class SyncCommand implements EasCommandHandler {
             }
             return this.addResponseElement(clientId, created.uid, "1");
         } catch (err: any) {
+            if (!created) {
+                // Nothing else can own the uid of a draft that was never created: what its seal stored goes with it.
+                await this.discardLosingSeal(round, options, undefined);
+            }
             // Status 6: "the client has sent a malformed or invalid item". Logged, since the device only keeps the
             // item to itself and the server would otherwise have no trace of why it never arrived.
             this.logger?.warn(`SyncCommand: refused a ${round.collectionClass} Add for folder ${folder.uid} (Status 6): ${err?.message ?? err}`);
@@ -907,16 +916,22 @@ export abstract class SyncCommand implements EasCommandHandler {
                 return this.statusResponseElement("Change", serverId, "6");
             }
         }
+        const options: DraftWriteOptions | undefined = this.draftWriteOptions(round, existing.uid);
+        let updated: any;
         try {
-            const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox(), this.draftWriteOptions(round, existing.uid));
+            const partial = await adapter.fromApplicationData(appData, existing, await round.getFolderMailbox(), options);
             const patch: any = { uid: existing.uid, version: existing.version, ...partial };
-            if (round.collectionClass === "Email" && SEARCH_INDEXED_FIELDS.some((field) => field in patch)) {
+            if (
+                round.collectionClass === "Email" &&
+                SEARCH_INDEXED_FIELDS.some((field) => field in patch) &&
+                !(await this.awaitsRelayReadable(round, existing))
+            ) {
                 // A direct write, so restapi's message route never clears the search stamp: the document SearchIndexJob built from the
                 // old subject, recipients, flags or body (readable, when a device's edit is what seals the draft) would stay for good.
                 Object.assign(patch, SEARCH_REINDEX);
             }
             await this.sealDeviceWrite(round, patch, existing);
-            const updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
+            updated = await repo.update(patch, asEntity(repo, existing), { ignoreACL: true });
             if (patch.zeroAccess) {
                 await this.discardReplacedBody(repo, existing);
             }
@@ -924,10 +939,70 @@ export abstract class SyncCommand implements EasCommandHandler {
             this.publishWrite(round, "update", updated);
             return undefined;
         } catch (err: any) {
+            if (!updated) {
+                await this.discardLosingSeal(round, options, existing);
+            }
             if (err instanceof ApiError && err.code === ApiErrors.INVALID_OBJECT_VERSION) {
                 return this.statusResponseElement("Change", serverId, "7");
             }
             return this.statusResponseElement("Change", serverId, "6");
+        }
+    }
+
+    /**
+     * Whether `existing` is a readable message in a zero-access mailbox's Outbox: a sealed draft assembled readable for sending, or any
+     * message waiting there to be relayed. Its search stamp was kept on purpose (server `BaseMailComposeRoute.storeBody()`), so
+     * SearchIndexJob never indexes its plaintext while it waits; a device's flag or read change must not clear it. restapi re-indexes
+     * the message when it files the sealed Sent Items copy.
+     */
+    private async awaitsRelayReadable(round: CollectionRound, existing: any): Promise<boolean> {
+        if (round.folder.type !== FolderType.OUTBOX || existing.zeroAccess || !this.zeroAccessWriter) {
+            return false;
+        }
+        return !!(await this.zeroAccessWriter.target(await round.getFolderMailbox()));
+    }
+
+    /**
+     * Removes what a device's draft save sealed (`draftWriteOptions()`) when the save then failed - a version conflict with a save that
+     * won, or an Add whose create failed: the fresh sealed blob, which nothing names, and the index entry `sealDraft()` replaced, which
+     * would otherwise stand in for content the draft never got. For a Change, the entry is only removed when `losingIndexEntryMayGo()`
+     * allows it. Best effort: the device is told the save failed either way.
+     */
+    private async discardLosingSeal(round: CollectionRound, options: DraftWriteOptions | undefined, existing: any): Promise<void> {
+        const sealed: ZeroAccessSealedFields | undefined = options?.sealed;
+        if (!sealed) {
+            return;
+        }
+        await this.blobStore?.delete(sealed.bodyBlobKey).catch(() => undefined);
+        if (existing && !(await this.losingIndexEntryMayGo(round, existing))) {
+            return;
+        }
+        await this.zeroAccessWriter!.removeIndexEntry(sealed.indexEntryUid).catch((err: any) => {
+            this.logger?.warn(`SyncCommand: could not remove the zero-access index entry of draft ${existing?.uid ?? "(not created)"} after a failed save: ${err?.message ?? err}`);
+        });
+    }
+
+    /**
+     * Whether the index entry a device's sealed draft save wrote may go after its update failed, judged by what the draft is now - as
+     * the server's `BaseMailComposeRoute.losingIndexEntryMayGo()` does. The entry shares its uid with the Sent Items copy's, and
+     * restapi's Sent Items seal keeps an entry that already exists. So once the draft was assembled readable for a send, or filed as
+     * the sealed Sent copy, this save's entry is the only one the sent message will get, and is kept. It goes when the draft is gone,
+     * when a sealed save won (whose next save writes its own), or when zero-access is no longer active for the mailbox. A failed
+     * lookup keeps it.
+     */
+    private async losingIndexEntryMayGo(round: CollectionRound, existing: any): Promise<boolean> {
+        try {
+            const current: any = await round.repo.findOne(existing.uid, { ignoreACL: true });
+            if (!current) {
+                return true;
+            }
+            if (current.zeroAccess) {
+                return typeof current.bodyBlobKey === "string" && current.bodyBlobKey.startsWith(zeroAccessDraftBlobPrefix(existing.mailboxUid));
+            }
+            return !(await this.zeroAccessWriter!.target(await round.getFolderMailbox()));
+        } catch (err: any) {
+            this.logger?.warn(`SyncCommand: could not tell whether draft ${existing.uid}'s zero-access index entry outlived a failed save; keeping it: ${err?.message ?? err}`);
+            return false;
         }
     }
 
@@ -986,14 +1061,16 @@ export abstract class SyncCommand implements EasCommandHandler {
      * `specs/search.md` §3: drafts are sealed on save) - see `SyncWriteOptions.sealDraftBody`. `undefined` for any other collection, or
      * when this backend can't seal mail.
      */
-    private draftWriteOptions(round: CollectionRound, uid: string): SyncWriteOptions | undefined {
+    private draftWriteOptions(round: CollectionRound, uid: string): DraftWriteOptions | undefined {
         const writer: ZeroAccessWriter | undefined = this.zeroAccessWriter;
         if (round.collectionClass !== "Email" || !writer) {
             return undefined;
         }
-        return {
+        const options: DraftWriteOptions = {
             sealDraftBody: async (mime: Buffer) => {
                 const sealed = await writer.sealDraft(await round.getFolderMailbox(), mime, uid, new Date());
+                // Kept so a save that then fails can remove what this stored (`discardLosingSeal()`).
+                options.sealed = sealed;
                 // Re-indexed as metadata only: a search document built while the draft was readable holds its subject and body.
                 return (
                     sealed && {
@@ -1007,6 +1084,7 @@ export abstract class SyncCommand implements EasCommandHandler {
                 );
             },
         };
+        return options;
     }
 
     /** Removes the body (and sanitized HTML) a draft sealed by a device's Change no longer points at - readable, when the draft was saved
