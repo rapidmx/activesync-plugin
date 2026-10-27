@@ -17,6 +17,9 @@ General code and review is to be performed with Sonnet 5.5 (`claude-sonnet-5-5`)
 investigation performed by Opus 5.5 (`claude-opus-5-5`). The following table details specific sub-categories or
 specialties.
 
+When categories overlap, the more specific one wins: for example, Security & Performance (Opus) overrides Code and Code
+Review (Sonnet) for security and performance topics.
+
 | Kind of work | Model |
 |---|---|
 | Design (specs, plans, architecture proposals) | Opus 5.5 (`claude-opus-5-5`) |
