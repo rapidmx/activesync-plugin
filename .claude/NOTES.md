@@ -1539,3 +1539,15 @@ JP: "Timezones are a critical part of calendar function. It needs to be fully wo
 
 - **Publish only from the tag's own green Build.** A release pushes `main` and its tag at the same commit, and each push runs Build. The old Publish ran after *any* green Build of a tagged commit, so v1.2.0 published from the `main` run while the tag's run had failed. `.github/workflows/publish.yml`'s `check` job now runs only for a tag push's Build and waits until every Build of that commit has finished, refusing if any did not succeed (a green rerun triggers it again). Rolled out to every repo with the same workflow after it worked here.
 - **`EasCollectionLease`**: a SET after Redis has answered is cut short by the wait's deadline; whether that timeout means "wait used up" (give up) or "Redis unresponsive" (fail open) is now decided by the limit applied (`limit < redisTimeoutMs`), not by re-reading `Date.now()`, which a timer can fire a millisecond before. This was the CI flake that failed v1.2.0's tag build.
+
+## Agent model assignments (JP, 2026-10-28)
+
+Standing rule for every AI agent working on this project (applies to all RapidMX and RapidREST repositories):
+
+| Kind of work | Model |
+|---|---|
+| Design (specs, plans, architecture proposals) | Opus 5.5 (`claude-opus-5-5`) |
+| Architectural review | Opus 5.5 (`claude-opus-5-5`) |
+| Code review (finding and verifying defects in diffs or code) | Sonnet 5.5 (`claude-sonnet-5-5`) |
+| Fixes (implementing review findings and other code changes) | Sonnet 5.5 (`claude-sonnet-5-5`) |
+| Simple operations (file operations, renames, project initialization and similar mechanical tasks) | Haiku 5.5 (`claude-haiku-5-5`) |
