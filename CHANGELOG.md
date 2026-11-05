@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-05
+
+### Added
+- Added the rule that the more specific agent model assignment wins where categories overlap
+- Added the RapidREST Claude Code plugin to the project settings
+
+### Changed
+- Record the standing agent model assignments in the project notes
+- Move the agent model assignments to the top of the project notes, keeping session history at the bottom
+- Update the agent model assignments to JP's revised criteria: Sonnet for general code and review, Opus for architecture, planning, investigation, security and performance, Haiku for simple operations
+- Upgrade @rapidrest/core to 6.1.0 and @rapidrest/service-core to 2.5.1
+- Raise the @rapidrest/core peer range from 5.x to 6.x, which @rapidrest/service-core 2.5 requires
+- Upgrade @rapidmx/restapi to ^0.36.0
+- Upgrade every other dependency to its latest release, keeping typescript on 6.x
+- Install corepack globally before enabling it in CI, since the node:lts images no longer bundle it
+- Upgrade @rapidmx/restapi to ^0.37.0
+
 ## [1.2.1] - 2026-10-26
 
 ### Changed
@@ -474,7 +491,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed unused files
 
-[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/rapidmx/activesync-plugin/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/rapidmx/activesync-plugin/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rapidmx/activesync-plugin/compare/v1.0.0...v1.1.0

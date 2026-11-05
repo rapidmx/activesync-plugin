@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.3.0
+
 ## v1.2.1
 
 ### Fixed
