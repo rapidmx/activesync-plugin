@@ -31,7 +31,7 @@
         "nodemailer": "^10.3.1"
     },
     "devDependencies": {
-        "@rapidmx/restapi": "^0.36.0",
+        "@rapidmx/restapi": "^0.37.0",
         "@rapidrest/core": "^6.1.0",
         "@rapidrest/service-core": "^2.5.1",
         "@swc/core": "^1.16.21",
