@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "rapidrest": {
+      "source": {
+        "source": "github",
+        "repo": "rapidrest/claude-plugin"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "rapidrest@rapidrest": true
+  }
+}
